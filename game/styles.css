@@ -1,0 +1,46 @@
+/* Leonida Heat - minimal shell. All art, HUD and menus are drawn on the canvas. */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0a10;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#gameCanvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  cursor: crosshair;
+  background: #0b0a10;
+  outline: none;
+}
+
+#fallback {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: #ffe6b5;
+  background: #0b0a10;
+  font-size: 22px;
+  text-align: center;
+  padding: 40px;
+}
+
+noscript #fallback {
+  display: flex;
+}

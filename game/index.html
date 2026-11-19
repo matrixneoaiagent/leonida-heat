@@ -4,16 +4,45 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <meta name="description" content="Leonida Heat: an original top-down open-world crime game set in Costa Sol. Drive, walk, carjack, run jobs and survive the heat. Canvas 2D and Web Audio, fully offline.">
   <title>Leonida Heat — A Costa Sol Crime Story</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231b1520'/%3E%3Ccircle cx='20' cy='20' r='10' fill='%23ffb45c'/%3E%3Crect x='14' y='32' width='36' height='8' rx='4' fill='%23ff6f91'/%3E%3Crect x='14' y='44' width='22' height='6' rx='3' fill='%23ffd166'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <canvas id="gameCanvas" width="1280" height="720" tabindex="0" aria-label="Leonida Heat, an open-world crime game set in Costa Sol"></canvas>
-  <div id="fallback">Leonida Heat needs JavaScript and a desktop browser with Canvas 2D.</div>
-  <noscript>
-    <div id="fallback">Leonida Heat needs JavaScript enabled.</div>
-  </noscript>
+  <main id="stage" aria-label="Leonida Heat game area">
+    <canvas
+      id="gameCanvas"
+      width="1280"
+      height="720"
+      tabindex="0"
+      role="application"
+      aria-label="Leonida Heat, a top-down open-world crime game set in Costa Sol. Use WASD to move, the mouse to aim, E to enter vehicles, and Escape to pause."
+      aria-describedby="gameHelp statusLine"
+    ></canvas>
+    <div id="loading" role="status" aria-live="polite">
+      <div class="loading-mark" aria-hidden="true"></div>
+      <div class="loading-copy">
+        <strong>LEONIDA HEAT</strong>
+        <span>Warming up Costa Sol…</span>
+      </div>
+    </div>
+    <div id="errorBanner" role="alert" hidden></div>
+    <p id="statusLine" class="sr-only" aria-live="polite">Loading</p>
+    <p id="gameHelp" class="sr-only">
+      WASD or arrow keys move and drive. Shift sprints. The mouse aims; left click fires.
+      E or F enters and exits vehicles and starts jobs. R reloads. 1 through 5 or the mouse
+      wheel changes weapons. Space dodges or applies the handbrake. H sounds the horn.
+      Q changes radio stations. M mutes. Escape or P pauses and saves.
+    </p>
+    <div id="fallback" role="alert">
+      <strong>Leonida Heat needs JavaScript and Canvas 2D.</strong>
+      <span>Please enable JavaScript, or open the game in a current desktop browser.</span>
+    </div>
+    <noscript>
+      <div class="noscript">Leonida Heat needs JavaScript enabled. The city, cars, HUD and soundtrack are all generated in the browser.</div>
+    </noscript>
+  </main>
   <script type="module" src="src/main.js"></script>
 </body>
 </html>

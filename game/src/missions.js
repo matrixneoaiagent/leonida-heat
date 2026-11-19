@@ -1,8 +1,7 @@
-// Leonida Heat - the five-mission story of Leo Calder and Maya Cruz.
-// Every objective is reachable on foot or by car. Steps spawn their actors when
-// they begin, keep a target for the map marker, and either complete, fail on a
-// timer/target loss, or hand the fail screen back to the game when the player is
-// wasted or busted.
+// Leonida Heat - the five-job story of Leo Calder and Maya Cruz.
+// Jobs escalate from a valet theft to a defended handoff, a dockside score,
+// an armoured convoy and finally Crowe's estate. Each step is a checkpoint;
+// retrying resumes the current objective rather than the whole job.
 
 import { Vehicle } from './entities.js';
 import { Enemy } from './combat.js';
@@ -12,101 +11,107 @@ const CAST = {
   maya: 'Maya Cruz',
   crowe: 'Silas Crowe',
   dispatch: 'Costa Sol Dispatch',
+  rourke: 'Dess Rourke',
 };
 
 const MISSIONS = [
   {
     id: 1,
-    title: 'Neon Welcome',
-    reward: 1000,
-    intro: 'Maya has work, and the city has a car with your name on it.',
+    title: 'Cold Start',
+    reward: 1400,
+    intro: 'Maya has a valet ticket and a buyer with no patience.',
     steps: [
       {
         type: 'waypoint',
         text: 'Meet Maya at The Pelican Grill on the Coral Strip',
-        target: { x: 2560, y: 1198, radius: 64 },
-        dialog: { speaker: CAST.maya, text: 'Leo! Over here by the grill. Welcome to Costa Sol — the sun is free, everything else has a price.' },
+        target: { x: 2560, y: 1198, radius: 66 },
+        dialog: { speaker: CAST.maya, text: 'Leo. Over here by the grill. Costa Sol looks expensive because it is. That is why we take things.' },
       },
       {
         type: 'steal_vehicle',
-        text: 'Steal the Marlin GT from Coral Valet',
-        target: { x: 2560, y: 900, radius: 60 },
+        text: 'Take the Marlin GT from Coral Valet',
+        target: { x: 2560, y: 900, radius: 62 },
         vehicle: 'marlin',
-        dialog: { speaker: CAST.maya, text: 'That Marlin GT at the valet is booked for a man who tips in threats. Take it to Rustline before he notices.' },
+        dialog: { speaker: CAST.maya, text: 'Red Marlin, valet stand, keys in the console. The owner tips in threats. Do not let him tip you.' },
       },
       {
         type: 'deliver_vehicle',
-        text: 'Deliver the Marlin GT to Rustline Chop Shop',
-        target: { x: 350, y: 2570, radius: 78 },
+        text: 'Deliver the Marlin to Rustline Chop Shop — 75 seconds',
+        target: { x: 350, y: 2570, radius: 82 },
         requireTargetVehicle: true,
-        dialog: { speaker: CAST.leo, text: 'Clean paint, full tank. The Ironworks always pays on delivery.' },
+        timeLimit: 75,
+        wantedOnStart: 1,
+        vehicle: 'marlin',
+        dialog: { speaker: CAST.leo, text: 'Clean paint, full tank. The Ironworks always pays on delivery. Usually.' },
       },
     ],
   },
   {
     id: 2,
-    title: 'Repo Run',
-    reward: 2500,
+    title: 'Plaza Debt',
+    reward: 3400,
     intro: 'A loan shark parked the wrong car in the wrong plaza.',
     steps: [
       {
         type: 'waypoint',
         text: 'Meet Maya at Vantage Plaza',
-        target: { x: 1750, y: 1480, radius: 72 },
-        dialog: { speaker: CAST.maya, text: 'Three of Rourke’s boys are babysitting a Vipera in the plaza. The car is owed to us. The boys are not.' },
+        target: { x: 1750, y: 1482, radius: 72 },
+        dialog: { speaker: CAST.maya, text: 'Rourke’s boys are babysitting a blue Vipera by the fountain. The car is owed to us. The boys are a rounding error.' },
       },
       {
         type: 'clear_and_steal',
         text: 'Clear the guards and take the Vipera',
-        target: { x: 1830, y: 1535, radius: 70 },
+        target: { x: 1830, y: 1535, radius: 74 },
         vehicle: 'vipera',
         guards: 3,
         guardWeapon: 'pistol',
-        dialog: { speaker: CAST.maya, text: 'I left something louder under the fountain. Try not to redecorate the whole plaza.' },
         grantWeapon: 'smg',
+        dialog: { speaker: CAST.maya, text: 'I left something louder under the fountain. Try not to redecorate the whole plaza.' },
       },
       {
         type: 'deliver_vehicle',
-        text: 'Deliver the Vipera to the Sabal Safehouse — 80 seconds',
-        target: { x: 1330, y: 1428, radius: 72 },
+        text: 'Deliver the Vipera to Sabal Safehouse — 85 seconds',
+        target: { x: 1330, y: 1418, radius: 74 },
         requireTargetVehicle: true,
-        timeLimit: 80,
-        dialog: { speaker: CAST.maya, text: 'Heat is on the car. Lose the tail if you can; just get it in the garage before the clock runs dry.' },
+        timeLimit: 85,
+        wantedOnStart: 2,
+        vehicle: 'vipera',
+        dialog: { speaker: CAST.maya, text: 'The plate is hot now. Lose the tail if you can; just get it behind the garage door before the clock runs dry.' },
       },
     ],
   },
   {
     id: 3,
-    title: 'Dockside Contraband',
-    reward: 4500,
-    intro: 'A briefcase at Pier 9 is worth more than the warehouse around it.',
+    title: 'Tidewater Score',
+    reward: 5200,
+    intro: 'A silver case at Pier 9 is worth more than the warehouse around it.',
     steps: [
       {
         type: 'waypoint',
         text: 'Reach Pier 9 in the Drydock Quarter',
-        target: { x: 2250, y: 2600, radius: 76 },
-        dialog: { speaker: CAST.maya, text: 'Crowe’s crew is unloading at Pier 9. The silver case goes to the safehouse — everything between you and it does not.' },
+        target: { x: 2250, y: 2600, radius: 78 },
+        dialog: { speaker: CAST.maya, text: 'Crowe’s crew is unloading at Pier 9. The silver case goes to the safehouse. Everything between you and it does not.' },
       },
       {
         type: 'eliminate',
         text: 'Take out the four dock guards',
-        target: { x: 2250, y: 2570, radius: 90 },
+        target: { x: 2250, y: 2565, radius: 100 },
         guards: 4,
         guardWeapon: 'smg',
-        spawnAt: { x: 2250, y: 2570, spread: 105 },
+        spawnAt: { x: 2250, y: 2565, spread: 118 },
         dialog: { speaker: CAST.leo, text: 'Four guards, one case. Simple arithmetic.' },
       },
       {
         type: 'collect',
         text: 'Grab the silver case from the loading bay',
-        target: { x: 2250, y: 2585, radius: 52 },
+        target: { x: 2250, y: 2585, radius: 54 },
         wanted: 2,
         dialog: { speaker: CAST.maya, text: 'That case is tagged. Every patrol on the docks just heard the alarm. Move!' },
       },
       {
         type: 'deliver',
         text: 'Escape the heat and reach the Sabal Safehouse — 100 seconds',
-        target: { x: 1330, y: 1428, radius: 76 },
+        target: { x: 1330, y: 1418, radius: 78 },
         timeLimit: 100,
         escape: true,
         dialog: { speaker: CAST.maya, text: 'Drop the case and the heat dies with it. Do not stop for anyone.' },
@@ -115,33 +120,35 @@ const MISSIONS = [
   },
   {
     id: 4,
-    title: 'Convoy Takedown',
-    reward: 8000,
-    intro: 'A armoured hauler is running diamonds across Grand Avenue.',
+    title: 'Armoured Run',
+    reward: 9000,
+    intro: 'A hauler full of stones is running Grand Avenue with two escorts.',
     steps: [
       {
         type: 'waypoint',
         text: 'Intercept the convoy on Grand Avenue',
-        target: { x: 1450, y: 1400, radius: 90 },
-        dialog: { speaker: CAST.maya, text: 'Armoured hauler, two escorts, diamonds in the back. Hit it before it reaches the bridge.' },
+        target: { x: 1480, y: 1400, radius: 92 },
+        dialog: { speaker: CAST.maya, text: 'Armoured hauler, two escorts, diamonds in the back. Hit it before it reaches the east bridge.' },
       },
       {
         type: 'destroy_convoy',
         text: 'Stop the armoured hauler before it escapes',
-        target: { x: 1250, y: 1400, radius: 100 },
+        target: { x: 1500, y: 1400, radius: 110 },
         vehicle: 'hauler',
+        timeLimit: 70,
         dialog: { speaker: CAST.leo, text: 'Big ugly van. Bigger payday.' },
       },
       {
         type: 'collect',
         text: 'Grab the diamond crate from the wreck',
-        target: { x: 1250, y: 1400, radius: 60 },
+        target: { x: 1500, y: 1400, radius: 64 },
         wanted: 3,
+        dialog: { speaker: CAST.maya, text: 'Crate’s in the cab. Three stars and a city full of mirrors. Go.' },
       },
       {
         type: 'deliver',
         text: 'Deliver the diamonds to Rustline — 110 seconds',
-        target: { x: 350, y: 2570, radius: 80 },
+        target: { x: 350, y: 2570, radius: 84 },
         timeLimit: 110,
         escape: true,
         dialog: { speaker: CAST.maya, text: 'Three stars, Leo. The whole city is awake now. Get to the Ironworks.' },
@@ -150,32 +157,45 @@ const MISSIONS = [
   },
   {
     id: 5,
-    title: 'King of Costa Sol',
-    reward: 20000,
+    title: 'Crowe’s Table',
+    reward: 24000,
     intro: 'Silas Crowe is done hiding behind his guards.',
     steps: [
       {
         type: 'waypoint',
         text: 'Storm the Crowe Estate on the north beach',
-        target: { x: 2560, y: 720, radius: 84 },
-        dialog: { speaker: CAST.maya, text: 'This is it, Leo. Crowe is behind that gate. I put a rifle and a vest in the dunes for you.' },
+        target: { x: 2560, y: 730, radius: 86 },
+        dialog: { speaker: CAST.maya, text: 'This is it. Crowe is behind that gate. I put a rifle and a vest in the dunes for you.' },
+      },
+      {
+        type: 'defend',
+        text: 'Hold the estate forecourt for 38 seconds',
+        target: { x: 2560, y: 610, radius: 160 },
+        duration: 38,
+        guards: 3,
+        guardWeapon: 'smg',
+        waves: 2,
+        grantWeapon: 'rifle',
+        wantedOnStart: 2,
+        dialog: { speaker: CAST.crowe, text: 'You think this city belongs to people like you? I built Costa Sol out of other people’s ruin.' },
       },
       {
         type: 'boss_fight',
         text: 'Defeat Silas Crowe and his crew',
-        target: { x: 2560, y: 600, radius: 110 },
-        guards: 5,
+        target: { x: 2560, y: 470, radius: 120 },
+        guards: 4,
         grantWeapon: 'rifle',
-        dialog: { speaker: CAST.crowe, text: 'You think this city belongs to people like you? I built Costa Sol out of other people’s ruin.' },
         supply: true,
+        wantedOnStart: 3,
+        dialog: { speaker: CAST.crowe, text: 'Come inside, Calder. I will show you what the view is worth.' },
       },
       {
         type: 'deliver',
-        text: 'Escape the four-star manhunt and reach the safehouse',
-        target: { x: 1330, y: 1428, radius: 84 },
+        text: 'Escape the manhunt and reach the Sabal Safehouse',
+        target: { x: 1330, y: 1418, radius: 86 },
         timeLimit: 150,
         escape: true,
-        wanted: 4,
+        wantedOnStart: 4,
         dialog: { speaker: CAST.maya, text: 'Crowe is down. Do not stop now. The safehouse and the whole city are waiting.' },
       },
     ],
@@ -189,6 +209,7 @@ export class MissionManager {
     this.defs = MISSIONS;
     this.currentIndex = 0;
     this.stepIndex = 0;
+    this.checkpointStep = 0;
     this.active = false;
     this.completedCount = 0;
     this.stepTimer = 0;
@@ -200,6 +221,11 @@ export class MissionManager {
     this.lastFailed = null;
     this.banner = null;
     this.stepTarget = null;
+    this.collectPoint = null;
+    this.courierRoute = null;
+    this.courierIndex = 0;
+    this.boss = null;
+    this.defend = null;
   }
 
   get definition() {
@@ -235,13 +261,17 @@ export class MissionManager {
     if (!this.active) return null;
     const step = this.step;
     if (!step) return null;
-    if (step.type === 'steal_vehicle' || step.type === 'clear_and_steal') {
-      if (this.targetVehicle && !this.targetVehicle.isDestroyed) {
-        return { x: this.targetVehicle.x, y: this.targetVehicle.y, radius: step.target.radius, label: step.text, mission: this.definition };
-      }
-    }
-    if (step.type === 'destroy_convoy' && this.targetVehicle) {
+    if ((step.type === 'steal_vehicle' || step.type === 'clear_and_steal' || step.type === 'destroy_convoy' || step.type === 'chase_vehicle') && this.targetVehicle && !this.targetVehicle.isDestroyed) {
       return { x: this.targetVehicle.x, y: this.targetVehicle.y, radius: step.target.radius, label: step.text, mission: this.definition };
+    }
+    if (step.type === 'deliver_vehicle' && step.requireTargetVehicle && this.targetVehicle && !this.targetVehicle.isDestroyed) {
+      if (this.game.player?.vehicle === this.targetVehicle) {
+        return { ...step.target, label: step.text, mission: this.definition };
+      }
+      return { x: this.targetVehicle.x, y: this.targetVehicle.y, radius: step.target.radius, label: step.text, mission: this.definition };
+    }
+    if (step.type === 'boss_fight' && this.boss && !this.boss.isDead) {
+      return { x: this.boss.x, y: this.boss.y, radius: step.target.radius, label: step.text, mission: this.definition };
     }
     if (step.type === 'collect' && this.collectPoint) {
       return { x: this.collectPoint.x, y: this.collectPoint.y, radius: step.target.radius, label: step.text, mission: this.definition };
@@ -256,56 +286,51 @@ export class MissionManager {
   }
 
   start(index = this.currentIndex) {
-    if (index >= this.defs.length) return false;
+    return this.startFrom(index, 0);
+  }
+
+  startFrom(index, step = 0, retry = false) {
+    if (index < 0 || index >= this.defs.length) return false;
     this.clearActors();
     this.currentIndex = index;
-    this.stepIndex = 0;
+    this.stepIndex = clampInt(step, 0, this.defs[index].steps.length - 1);
+    this.checkpointStep = this.stepIndex;
     this.active = true;
     this.stepTimer = 0;
     this.stepTimeLimit = 0;
     this.collectPoint = null;
     this.convoyEscaped = false;
-    this.pendingCollect = null;
     this.lastFailed = null;
-    const def = this.definition;
-    this.game.showMissionBanner(def, index);
-    this.setupStep();
+    this.defend = null;
+    this.boss = null;
+    this.game.police.setWanted(0);
+    this.game.state = 'playing';
+    if (!retry) this.game.showMissionBanner(this.definition, index);
+    this.setupStep(retry);
     this.game.autosave();
     return true;
   }
 
   resume(index, step) {
-    if (index < 0 || index >= this.defs.length) return false;
-    this.clearActors();
-    this.currentIndex = index;
-    this.stepIndex = Math.max(0, Math.min(this.defs[index].steps.length - 1, step));
-    this.active = true;
-    this.stepTimer = 0;
-    this.collectPoint = null;
-    this.convoyEscaped = false;
-    this.setupStep(true);
-    // If the save was made while handling the objective car, keep that car
-    // reachable from the restored player position instead of stranding it.
-    if (this.targetVehicle && (this.step?.type === 'deliver_vehicle' || this.step?.type === 'clear_and_steal')) {
-      this.targetVehicle.x = this.game.player.x + 70;
-      this.targetVehicle.y = this.game.player.y;
-      this.targetVehicle.vx = 0;
-      this.targetVehicle.vy = 0;
-    }
-    return true;
+    return this.startFrom(index, step, true);
   }
 
   retry() {
     const index = this.lastFailed?.index ?? this.currentIndex;
+    const step = this.lastFailed?.step ?? this.checkpointStep;
     this.game.state = 'playing';
-    this.start(index);
+    this.game.player.health = Math.max(60, this.game.player.health);
+    this.game.player.armor = Math.max(30, this.game.player.armor);
+    this.game.police.clearWanted();
+    this.startFrom(index, step, true);
+    this.game.ui.showToast('Checkpoint retry. Stay sharp.', 'warning', 2.4);
   }
 
   abandon() {
     this.clearActors();
     this.active = false;
     this.game.state = 'playing';
-    this.game.ui.showToast('Mission dropped. The marker is still there when you are ready.', 'neutral', 3);
+    this.game.ui.showToast('Job dropped. The marker is still there when you are ready.', 'neutral', 3);
     this.game.autosave();
   }
 
@@ -319,7 +344,7 @@ export class MissionManager {
       }
     }
     for (const e of this.entities) {
-      if (!e || e.isDead) continue;
+      if (!e) continue;
       const idx = this.game.combat.enemies.indexOf(e);
       if (idx >= 0) this.game.combat.enemies.splice(idx, 1);
     }
@@ -327,6 +352,10 @@ export class MissionManager {
     this.convoy = [];
     this.targetVehicle = null;
     this.collectPoint = null;
+    this.courierRoute = null;
+    this.courierIndex = 0;
+    this.boss = null;
+    this.defend = null;
   }
 
   setupStep(resumed = false) {
@@ -337,50 +366,63 @@ export class MissionManager {
     this.collectPoint = null;
     this.stepTarget = step.target ? { ...step.target } : null;
     this.game.ui.objectiveHint = '';
+    this.defend = null;
+    this.boss = null;
 
     if (step.grantWeapon) {
       this.game.player.giveWeapon(step.grantWeapon, 2);
-      if (step.grantWeapon === 'smg') this.game.ui.showToast('Maya slipped you a Tide SMG.', 'success', 2.6);
+      if (!resumed) {
+        const label = step.grantWeapon === 'smg' ? 'Tide SMG' : step.grantWeapon === 'rifle' ? 'Ranger Rifle' : step.grantWeapon;
+        this.game.ui.showToast(`Maya slipped you a ${label}.`, 'success', 2.5);
+      }
     }
     if (step.supply) {
       this.game.player.armor = Math.max(this.game.player.armor, 100);
-      this.game.spawnPickup('health', 2510, 640);
-      this.game.spawnPickup('armor', 2600, 640);
+      this.game.spawnPickup('health', 2500, 640);
+      this.game.spawnPickup('armor', 2610, 640);
     }
+    if (step.wantedOnStart) this.game.police.setWanted(step.wantedOnStart);
 
     if (step.type === 'steal_vehicle') {
       this.spawnTargetVehicle(step);
     } else if (step.type === 'clear_and_steal') {
       this.spawnTargetVehicle(step);
-      this.spawnGuards(step, step.target.x + 20, step.target.y - 36, step.guards || 3, step.guardWeapon || 'pistol');
-      if (!resumed) this.game.ui.showToast('Guards are on the Vipera. Clear them out.', 'danger', 3);
+      this.spawnGuards(step.target.x + 20, step.target.y - 34, step.guards || 3, step.guardWeapon || 'pistol', 76);
+      if (!resumed) this.game.ui.showToast('Guards are on the car. Clear them out.', 'danger', 3);
     } else if (step.type === 'eliminate') {
-      this.spawnGuards(step, step.spawnAt?.x ?? step.target.x, step.spawnAt?.y ?? step.target.y, step.guards || 4, step.guardWeapon || 'smg', step.spawnAt?.spread || 90);
+      this.spawnGuards(step.spawnAt?.x ?? step.target.x, step.spawnAt?.y ?? step.target.y, step.guards || 4, step.guardWeapon || 'smg', step.spawnAt?.spread || 100);
     } else if (step.type === 'destroy_convoy') {
-      this.spawnConvoy(step);
+      this.spawnConvoy(step, resumed);
     } else if (step.type === 'boss_fight') {
       this.spawnBoss(step);
+    } else if (step.type === 'chase_vehicle') {
+      this.spawnCourier(step);
     } else if (step.type === 'collect') {
       let px = step.target.x;
       let py = step.target.y;
-      if (this.pendingCollect) {
-        px = this.pendingCollect.x;
-        py = this.pendingCollect.y;
-        this.pendingCollect = null;
-      } else if (this.convoy.length && this.convoy[0].isDestroyed) {
+      if (this.convoy.length && this.convoy[0]?.isDestroyed) {
         px = this.convoy[0].x;
         py = this.convoy[0].y;
       }
       this.collectPoint = { x: px, y: py };
       this.stepTarget = { x: px, y: py, radius: step.target.radius };
+    } else if (step.type === 'defend') {
+      this.defend = {
+        elapsed: 0,
+        waveTimer: 1.4,
+        wavesSpawned: 0,
+        waves: step.waves || 2,
+        leaveTimer: 0,
+        spawnedWaves: 0,
+      };
+      this.spawnGuards(step.target.x, step.target.y - 90, 2, step.guardWeapon || 'smg', 80);
+    } else if (step.type === 'deliver_vehicle' && step.requireTargetVehicle && !this.targetVehicle) {
+      // A restored checkpoint must still have its objective car nearby.
+      this.spawnTargetVehicle({ ...step, target: { x: this.game.player.x + 90, y: this.game.player.y, radius: step.target.radius } });
     }
 
-    if (step.dialog && !resumed) {
-      this.game.showDialog(step.dialog.speaker, step.dialog.text);
-    }
-    if (this.stepTimeLimit) {
-      this.game.ui.showToast(`Timer started: ${this.stepTimeLimit}s`, 'warning', 2.2);
-    }
+    if (step.dialog && !resumed) this.game.showDialog(step.dialog.speaker, step.dialog.text);
+    if (this.stepTimeLimit) this.game.ui.showToast(`Timer started: ${this.stepTimeLimit}s`, 'warning', 2.2);
   }
 
   spawnTargetVehicle(step) {
@@ -389,60 +431,90 @@ export class MissionManager {
     v.aiMode = 'parked';
     v.driver = null;
     v.occupiedByCivilian = false;
+    v.maxHp *= 1.35;
+    v.hp = v.maxHp;
     this.game.traffic.vehicles.push(v);
     this.targetVehicle = v;
     return v;
   }
 
-  spawnGuards(step, x, y, count, weapon, spread = 70) {
+  spawnCourier(step) {
+    const v = new Vehicle(step.vehicle || 'vipera', step.target.x, step.target.y, 0.2);
+    v.isMission = true;
+    v.aiMode = 'courier';
+    v.driver = { isCourier: true };
+    v.occupiedByCivilian = false;
+    v.maxHp = 220;
+    v.hp = 220;
+    v.cruiseSpeed = 250;
+    this.game.traffic.vehicles.push(v);
+    this.targetVehicle = v;
+    this.courierRoute = [
+      { x: step.target.x + 420, y: step.target.y - 70 },
+      { x: 2240, y: 760 },
+      { x: 2240, y: 2600 },
+    ];
+    this.courierIndex = 0;
+    return v;
+  }
+
+  spawnGuards(x, y, count, weapon, spread = 80) {
     for (let i = 0; i < count; i += 1) {
-      // Guards stand in the open in front of the objective (south half),
-      // never inside the warehouse or estate behind it.
-      const angle = 0.18 * Math.PI + (i / Math.max(1, count - 1)) * 0.64 * Math.PI;
-      const gx = x + Math.cos(angle) * spread * (0.65 + Math.random() * 0.35);
-      const gy = y + Math.abs(Math.sin(angle)) * spread * (0.5 + Math.random() * 0.5) + 8;
+      const angle = 0.12 * Math.PI + (i / Math.max(1, count - 1)) * 0.76 * Math.PI;
+      let gx = x + Math.cos(angle) * spread * (0.7 + Math.random() * 0.5);
+      let gy = y + Math.abs(Math.sin(angle)) * spread * (0.55 + Math.random() * 0.5) + 8;
+      if (this.city.pointBlocked(gx, gy, 18)) {
+        gx = x + (Math.random() - 0.5) * spread * 1.8;
+        gy = y + Math.abs(Math.sin(angle)) * spread * 0.6 + 30;
+      }
       const e = new Enemy(gx, gy, weapon);
       this.game.combat.enemies.push(e);
       this.entities.push(e);
     }
   }
 
-  spawnConvoy(step) {
-    const van = new Vehicle(step.vehicle || 'hauler', step.target.x, step.target.y, 0);
+  spawnConvoy(step, resumed = false) {
+    const startX = resumed ? Math.max(step.target.x, this.game.player.x - 240) : step.target.x;
+    const van = new Vehicle(step.vehicle || 'hauler', startX, step.target.y, 0);
     van.isMission = true;
     van.aiMode = 'convoy';
     van.driver = { isConvoy: true };
-    van.cruiseSpeed = 72;
+    van.cruiseSpeed = 96;
+    van.maxHp = 360;
+    van.hp = 360;
     this.game.traffic.vehicles.push(van);
     this.targetVehicle = van;
     this.convoy.push(van);
 
-    const escortA = new Vehicle('vipera', step.target.x - 70, step.target.y - 26, 0, '#20242c');
-    const escortB = new Vehicle('vipera', step.target.x - 120, step.target.y + 26, 0, '#20242c');
+    const escortA = new Vehicle('vipera', startX - 80, step.target.y - 30, 0, '#20242c');
+    const escortB = new Vehicle('vipera', startX - 145, step.target.y + 30, 0, '#20242c');
     for (const e of [escortA, escortB]) {
       e.isMission = true;
       e.aiMode = 'convoy';
       e.driver = { isConvoy: true };
-      e.cruiseSpeed = 68;
+      e.cruiseSpeed = 94;
+      e.maxHp = 180;
+      e.hp = 180;
       this.game.traffic.vehicles.push(e);
       this.convoy.push(e);
     }
-    this.game.ui.showToast('Convoy spotted — stop the hauler!', 'danger', 3);
+    if (!resumed) this.game.ui.showToast('Convoy spotted — stop the hauler!', 'danger', 3);
   }
 
   spawnBoss(step) {
     const boss = new Enemy(step.target.x, step.target.y, 'rifle', true);
     this.game.combat.enemies.push(boss);
     this.entities.push(boss);
-    const count = step.guards || 5;
+    this.boss = boss;
+    const count = step.guards || 4;
     for (let i = 0; i < count; i += 1) {
-      const gx = step.target.x - 120 + (i / (count - 1 || 1)) * 240;
-      const gy = step.target.y + 35 + (i % 2) * 42;
-      const guard = new Enemy(gx, gy, i % 2 === 0 ? 'smg' : 'pistol');
+      const gx = step.target.x - 110 + (i / (Math.max(1, count - 1))) * 220;
+      const gy = step.target.y + 34 + (i % 2) * 40;
+      const guard = new Enemy(gx, gy, i % 2 === 0 ? 'smg' : 'shotgun');
       this.game.combat.enemies.push(guard);
       this.entities.push(guard);
     }
-    this.game.police.setWanted(2);
+    this.game.police.setWanted(step.wantedOnStart || 2);
     this.game.ui.showToast('Crowe’s crew is dug in. Use the rifle.', 'danger', 3.4);
   }
 
@@ -451,30 +523,28 @@ export class MissionManager {
     const step = this.step;
     if (!step) return;
 
-    if (this.stepTimeLimit > 0) {
-      this.stepTimer += dt;
-      if (this.stepTimer >= this.stepTimeLimit) {
-        this.fail('The clock ran out.');
-        return;
-      }
+    this.stepTimer += dt;
+    if (this.stepTimeLimit > 0 && this.stepTimer >= this.stepTimeLimit) {
+      this.fail('The clock ran out.');
+      return;
     }
 
-    // Moving convoy.
+    // Moving objectives.
     if (step.type === 'destroy_convoy') {
       for (const v of this.convoy) {
         if (v === this.targetVehicle) {
-          v.angle = 0;
           if (!v.isDestroyed) {
+            v.angle = 0;
             v.vx = v.cruiseSpeed;
             v.vy = 0;
             v.x += v.vx * dt;
-            if (v.x > 2310) this.convoyEscaped = true;
+            if (v.x > 2320) this.convoyEscaped = true;
           }
         } else if (!v.isDestroyed) {
-          const targetX = this.targetVehicle.x - 70;
-          const targetY = this.targetVehicle.y + (v.y < 1400 ? -26 : 26);
-          v.vx = (targetX - v.x) * 1.6;
-          v.vy = (targetY - v.y) * 3.2;
+          const targetX = this.targetVehicle.x - 80;
+          const targetY = this.targetVehicle.y + (v.y < 1400 ? -30 : 30);
+          v.vx = (targetX - v.x) * 1.8;
+          v.vy = (targetY - v.y) * 3.4;
           v.angle = Math.atan2(v.vy, v.vx) || 0;
         }
         v.update(dt, this.city, this.game.particles, this.game.audio);
@@ -484,8 +554,70 @@ export class MissionManager {
         return;
       }
       if (this.targetVehicle && this.targetVehicle.isDestroyed) {
-        this.pendingCollect = { x: this.targetVehicle.x, y: this.targetVehicle.y };
+        const wreckX = this.targetVehicle.x;
+        const wreckY = this.targetVehicle.y;
         this.game.ui.showToast('Hauler stopped. Grab the crate.', 'success', 3);
+        this.advance();
+        if (this.step?.type === 'collect') {
+          this.collectPoint = { x: wreckX, y: wreckY };
+          this.stepTarget = { x: wreckX, y: wreckY, radius: this.step.target.radius };
+        }
+        return;
+      }
+    }
+
+    if (step.type === 'chase_vehicle' && this.targetVehicle) {
+      const v = this.targetVehicle;
+      if (v.isDestroyed) {
+        this.game.ui.showToast('Courier stopped.', 'success', 2.6);
+        this.advance();
+        return;
+      }
+      if (this.courierRoute && this.courierRoute[this.courierIndex]) {
+        const target = this.courierRoute[this.courierIndex];
+        const desired = Math.atan2(target.y - v.y, target.x - v.x);
+        let diff = desired - v.angle;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        v.angle += Math.max(-2.4 * dt, Math.min(2.4 * dt, diff));
+        v.vx = Math.cos(v.angle) * 275;
+        v.vy = Math.sin(v.angle) * 275;
+        v.update(dt, this.city, this.game.particles, this.game.audio);
+        if (Math.hypot(target.x - v.x, target.y - v.y) < 80) {
+          this.courierIndex += 1;
+          if (this.courierIndex >= this.courierRoute.length) {
+            this.fail('The courier got away with the ledger.');
+            return;
+          }
+        }
+      }
+    }
+
+    if (step.type === 'defend' && this.defend) {
+      const d = this.defend;
+      d.elapsed += dt;
+      d.waveTimer -= dt;
+      const dist = Math.hypot(player.x - step.target.x, player.y - step.target.y);
+      if (dist > 330) {
+        d.leaveTimer += dt;
+        this.game.ui.objectiveHint = `Return to the forecourt — ${Math.max(0, 8 - Math.floor(d.leaveTimer))}s`;
+        if (d.leaveTimer > 8) {
+          this.fail('You abandoned the forecourt.');
+          return;
+        }
+      } else {
+        d.leaveTimer = Math.max(0, d.leaveTimer - dt * 1.5);
+        this.game.ui.objectiveHint = `Hold — ${Math.ceil(step.duration - d.elapsed)}s`;
+      }
+      if (d.waveTimer <= 0 && d.wavesSpawned < d.waves) {
+        d.waveTimer = 10.5;
+        d.wavesSpawned += 1;
+        const count = step.guards || 3;
+        this.spawnGuards(step.target.x, step.target.y - 100, count, step.guardWeapon || 'smg', 105);
+        this.game.ui.showToast(`Wave ${d.wavesSpawned} of ${d.waves} incoming.`, 'danger', 2.4);
+      }
+      if (d.elapsed >= step.duration) {
+        this.game.ui.showToast('Forecourt held. Crowe is inside.', 'success', 3);
         this.advance();
         return;
       }
@@ -514,14 +646,13 @@ export class MissionManager {
           this.game.police.setWanted(1);
           this.game.ui.showToast('Vipera acquired — one star of heat.', 'warning', 2.6);
           this.advance();
-        } else if (guardsDead && player.vehicle !== this.targetVehicle) {
+        } else if (guardsDead && player.vehicle !== this.targetVehicle && this.stepIndex === 1) {
           this.game.ui.objectiveHint = 'Guards down. Get in the Vipera.';
         }
         break;
       }
       case 'eliminate': {
-        const allDead = this.entities.every((e) => !e || e.isDead);
-        if (allDead) this.advance();
+        if (this.entities.length > 0 && this.entities.every((e) => !e || e.isDead)) this.advance();
         break;
       }
       case 'collect':
@@ -533,7 +664,10 @@ export class MissionManager {
         }
         break;
       case 'destroy_convoy':
-        // Handled above through the moving convoy branch.
+        break;
+      case 'chase_vehicle':
+        break;
+      case 'defend':
         break;
       case 'deliver_vehicle':
         if (dist < target.radius) {
@@ -552,9 +686,7 @@ export class MissionManager {
         break;
       }
       case 'boss_fight': {
-        const boss = this.entities[0];
-        const allDead = this.entities.every((e) => !e || e.isDead);
-        if (allDead || (boss && boss.isDead)) {
+        if (this.boss && this.boss.isDead) {
           this.game.police.setWanted(4);
           this.advance();
         }
@@ -567,12 +699,13 @@ export class MissionManager {
 
   advance() {
     const def = this.definition;
-    const finishedStep = this.stepIndex;
+    if (!def) return;
     this.stepIndex += 1;
     this.stepTimer = 0;
     this.stepTimeLimit = 0;
+    this.checkpointStep = Math.min(this.stepIndex, def.steps.length - 1);
+    this.game.ui.objectiveHint = '';
 
-    // Vehicles spawned purely for the completed step stop being mission cars.
     for (const v of [...this.convoy]) {
       if (v !== this.game.player.vehicle) v.isMission = false;
     }
@@ -584,13 +717,16 @@ export class MissionManager {
     }
     this.entities = [];
     this.targetVehicle = this.game.player.vehicle && this.targetVehicle === this.game.player.vehicle ? this.targetVehicle : null;
+    this.boss = null;
+    this.defend = null;
 
     if (this.stepIndex >= def.steps.length) {
       this.complete();
     } else {
       this.game.audio.playPickup();
+      this.game.ui.showToast(`Checkpoint — step ${this.stepIndex + 1} of ${def.steps.length}.`, 'success', 2.2);
       this.setupStep();
-      void finishedStep;
+      this.game.autosave();
     }
   }
 
@@ -600,16 +736,18 @@ export class MissionManager {
     this.active = false;
     this.completedCount = Math.max(this.completedCount, this.currentIndex + 1);
     this.game.player.money += reward;
+    this.game.player.score += 400 + this.currentIndex * 250;
     this.clearActors();
     this.currentIndex += 1;
     this.stepIndex = 0;
+    this.checkpointStep = 0;
     this.game.onMissionComplete(def, reward);
   }
 
   fail(reason) {
     if (!this.active) return;
     this.active = false;
-    this.lastFailed = { index: this.currentIndex, reason };
+    this.lastFailed = { index: this.currentIndex, step: this.checkpointStep, reason };
     this.clearActors();
     this.game.onMissionFailed(this.definition, reason);
   }
@@ -617,7 +755,13 @@ export class MissionManager {
   failSilent(reason) {
     if (!this.active) return;
     this.active = false;
-    this.lastFailed = { index: this.currentIndex, reason };
+    this.lastFailed = { index: this.currentIndex, step: this.checkpointStep, reason };
     this.clearActors();
   }
+}
+
+function clampInt(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.round(n)));
 }

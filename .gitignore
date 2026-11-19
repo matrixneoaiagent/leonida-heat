@@ -1,1 +1,31 @@
+# Local build and editor output
 out/
+dist/
+build/
+node_modules/
+.cache/
+.tmp/
+*.tsbuildinfo
+
+# Screenshot scratch frames (the four shipped frames in screenshots/ are kept)
+.shots/
+shot-*.jpg
+*-check-*.jpg
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+*.log
+npm-debug.log*
+.env
+.env.*
+
+# Coverage and profiling
+coverage/
+*.cpuprofile
+*.heapprofile

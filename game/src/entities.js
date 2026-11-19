@@ -1,63 +1,100 @@
-// Leonida Heat - entities and their physics.
-// ParticleSystem (decals, smoke, sparks, cash), Vehicle (arcade car physics
-// in world pixels per second), Player (on foot and in cars) and Pedestrian
-// (sidewalk walkers, crossers, panickers and robbery targets).
+// Leonida Heat - bodies, wheels and sparks.
+// ParticleSystem is a small pooled effect bus. Vehicle is an arcade car with
+// longitudinal/lateral grip and a drift handbrake. Player handles on-foot
+// movement, weapon bookkeeping and four-direction animation state. Pedestrian
+// walks, idles, crosses, panics, flees and reacts to violence.
 
-import { VEHICLE_TYPES, WEAPON_CONFIG, PHYSICS_CONFIG } from './config.js';
+import { VEHICLE_TYPES, WEAPON_CONFIG, PHYSICS_CONFIG, PALETTE } from './config.js';
+import { hash2 } from './rng.js';
 
-// =====================================================================
+const TAU = Math.PI * 2;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function facingFromAngle(angle) {
+  const a = Math.atan2(Math.sin(angle), Math.cos(angle));
+  if (a > -Math.PI / 4 && a <= Math.PI / 4) return 3; // right
+  if (a > Math.PI / 4 && a <= (Math.PI * 3) / 4) return 0; // down
+  if (a > -(Math.PI * 3) / 4 && a <= -Math.PI / 4) return 2; // up
+  return 1; // left
+}
+
+// ===========================================================================
 // Particles
-// =====================================================================
+// ===========================================================================
 export class ParticleSystem {
   constructor() {
     this.particles = [];
-    this.bloodDecals = [];
+    this.scuffs = [];
     this.cashPickups = [];
     this.explosions = [];
-    this.maxParticles = 520;
+    this.maxParticles = 720;
+    this.time = 0;
   }
 
   add(p) {
     if (this.particles.length >= this.maxParticles) this.particles.shift();
     p.life = p.life ?? 1;
     p.decay = p.decay ?? 1.6;
+    p.maxLife = p.maxLife ?? p.life;
     this.particles.push(p);
   }
 
   spawnSparks(x, y, count = 6, speed = 1) {
     for (let i = 0; i < count; i += 1) {
-      const a = Math.random() * Math.PI * 2;
-      const s = (70 + Math.random() * 190) * speed;
+      const a = Math.random() * TAU;
+      const s = (75 + Math.random() * 205) * speed;
       this.add({
         type: 'spark', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-        life: 0.5, decay: 2.4, size: 1.3 + Math.random() * 1.8,
+        life: 0.46, decay: 2.7, size: 1.2 + Math.random() * 1.8,
         color: Math.random() > 0.45 ? '#ffe27a' : '#ff9c4a',
       });
     }
   }
 
-  spawnBlood(x, y, count = 6, dir = null) {
+  spawnHit(x, y, count = 5, dir = null) {
+    // Blood-free impact feedback: a hot flash and a little dry dust.
     for (let i = 0; i < count; i += 1) {
-      const a = dir === null ? Math.random() * Math.PI * 2 : dir + (Math.random() - 0.5) * 1.4;
-      const s = 50 + Math.random() * 160;
+      const a = dir === null ? Math.random() * TAU : dir + (Math.random() - 0.5) * 1.5;
+      const s = 65 + Math.random() * 165;
       this.add({
-        type: 'blood_drop', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-        life: 0.55, decay: 2.2, size: 1.6 + Math.random() * 2.4,
+        type: 'hit', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        life: 0.34, decay: 3.4, size: 3 + Math.random() * 4,
+        color: Math.random() > 0.5 ? '#ffe9b5' : '#ffbd6d',
       });
     }
-    this.bloodDecals.push({ x: x + (Math.random() - 0.5) * 14, y: y + (Math.random() - 0.5) * 14, r: 7 + Math.random() * 10, alpha: 0.75 });
-    if (this.bloodDecals.length > 130) this.bloodDecals.shift();
+    this.add({
+      type: 'dust', x, y, vx: 0, vy: 0, life: 0.5, decay: 2.2,
+      size: 7 + Math.random() * 5, color: 'rgba(222, 210, 190, 0.5)',
+    });
+  }
+
+  spawnBlood(x, y, count = 5, dir = null) {
+    this.spawnHit(x, y, count, dir);
+  }
+
+  spawnDust(x, y, count = 1, size = 7, vx = 0, vy = 0) {
+    for (let i = 0; i < count; i += 1) {
+      this.add({
+        type: 'dust',
+        x: x + (Math.random() - 0.5) * 12,
+        y: y + (Math.random() - 0.5) * 12,
+        vx: vx + (Math.random() - 0.5) * 42,
+        vy: vy + (Math.random() - 0.5) * 42,
+        life: 0.75, decay: 1.4, size: size + Math.random() * 5,
+        color: 'rgba(218, 205, 180, 0.5)',
+      });
+    }
   }
 
   spawnSmoke(x, y, color = 'rgba(180, 180, 185, 0.55)', count = 1, size = 8, rise = 22) {
     for (let i = 0; i < count; i += 1) {
       this.add({
         type: 'smoke',
-        x: x + (Math.random() - 0.5) * 8,
-        y: y + (Math.random() - 0.5) * 8,
-        vx: (Math.random() - 0.5) * 24,
+        x: x + (Math.random() - 0.5) * 9,
+        y: y + (Math.random() - 0.5) * 9,
+        vx: (Math.random() - 0.5) * 26,
         vy: -rise - Math.random() * 20,
-        life: 1, decay: 0.55 + Math.random() * 0.4, size, color,
+        life: 1, decay: 0.52 + Math.random() * 0.34, size, color,
       });
     }
   }
@@ -66,121 +103,142 @@ export class ParticleSystem {
     for (let i = 0; i < count; i += 1) {
       this.add({
         type: 'fire',
-        x: x + (Math.random() - 0.5) * 10,
-        y: y + (Math.random() - 0.5) * 10,
-        vx: (Math.random() - 0.5) * 40,
-        vy: -40 - Math.random() * 40,
-        life: 0.8, decay: 1.6, size: size + Math.random() * 6,
-        color: Math.random() > 0.5 ? '#ff5a1f' : '#ffc44d',
+        x: x + (Math.random() - 0.5) * 11,
+        y: y + (Math.random() - 0.5) * 11,
+        vx: (Math.random() - 0.5) * 42,
+        vy: -42 - Math.random() * 48,
+        life: 0.8, decay: 1.7, size: size + Math.random() * 7,
+        color: Math.random() > 0.48 ? '#ff5a1f' : '#ffc44d',
       });
     }
   }
 
   spawnExplosion(x, y) {
-    this.explosions.push({ x, y, radius: 120, damage: 70 });
-    this.add({ type: 'shockwave', x, y, radius: 8, maxRadius: 135, life: 1, decay: 1.5 });
-    for (let i = 0; i < 26; i += 1) {
-      const a = Math.random() * Math.PI * 2;
-      const s = 90 + Math.random() * 320;
+    this.explosions.push({ x, y, radius: 128, damage: 72, age: 0 });
+    this.add({ type: 'shockwave', x, y, radius: 8, maxRadius: 148, life: 1, decay: 1.4 });
+    for (let i = 0; i < 30; i += 1) {
+      const a = Math.random() * TAU;
+      const s = 90 + Math.random() * 340;
       this.add({
         type: 'explosion_fire', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-        life: 1, decay: 1.05, size: 16 + Math.random() * 20,
+        life: 1, decay: 1.05, size: 16 + Math.random() * 22,
         color: Math.random() > 0.4 ? '#ff4a12' : '#ffc23a',
       });
     }
-    for (let i = 0; i < 20; i += 1) {
-      const a = Math.random() * Math.PI * 2;
-      const s = 40 + Math.random() * 150;
+    for (let i = 0; i < 24; i += 1) {
+      const a = Math.random() * TAU;
+      const s = 40 + Math.random() * 160;
       this.add({
-        type: 'smoke', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 35,
-        life: 1, decay: 0.4, size: 20 + Math.random() * 18, color: 'rgba(34, 30, 38, 0.72)',
+        type: 'smoke', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 38,
+        life: 1, decay: 0.34, size: 20 + Math.random() * 22,
+        color: i % 3 === 0 ? 'rgba(62, 50, 54, 0.76)' : 'rgba(34, 30, 38, 0.62)',
       });
     }
-    this.spawnSparks(x, y, 20, 1.6);
+    this.spawnSparks(x, y, 24, 1.7);
+    this.spawnDust(x, y, 9, 18);
   }
 
   spawnMuzzle(x, y, angle, size = 10) {
-    this.add({
-      type: 'muzzle', x, y, vx: 0, vy: 0, angle, life: 0.07, decay: 14, size,
-    });
-    for (let i = 0; i < 3; i += 1) {
-      const a = angle + (Math.random() - 0.5) * 0.7;
+    this.add({ type: 'muzzle', x, y, vx: 0, vy: 0, angle, life: 0.075, decay: 14, size });
+    for (let i = 0; i < 4; i += 1) {
+      const a = angle + (Math.random() - 0.5) * 0.8;
       this.add({
-        type: 'spark', x, y, vx: Math.cos(a) * 260, vy: Math.sin(a) * 260,
-        life: 0.18, decay: 6, size: 1.4, color: '#ffe9a8',
+        type: 'spark', x, y, vx: Math.cos(a) * 300, vy: Math.sin(a) * 300,
+        life: 0.17, decay: 6.2, size: 1.5, color: '#ffe9a8',
       });
     }
   }
 
   spawnShell(x, y, angle) {
     this.add({
-      type: 'casing', x, y, vx: Math.cos(angle + 1.9) * 110, vy: Math.sin(angle + 1.9) * 110,
+      type: 'casing', x, y, vx: Math.cos(angle + 1.9) * 115, vy: Math.sin(angle + 1.9) * 115,
       life: 0.9, decay: 1.1, size: 2.2, spin: Math.random() * 6,
     });
   }
 
   spawnFootstep(x, y) {
     this.add({
-      type: 'dust', x, y, vx: (Math.random() - 0.5) * 18, vy: (Math.random() - 0.5) * 18,
-      life: 0.6, decay: 2.4, size: 3 + Math.random() * 2,
+      type: 'dust', x, y, vx: (Math.random() - 0.5) * 20, vy: (Math.random() - 0.5) * 20,
+      life: 0.55, decay: 2.8, size: 3 + Math.random() * 2,
+      color: 'rgba(226, 214, 192, 0.42)',
     });
   }
 
-  spawnTyreSmoke(x, y) {
+  spawnTyreSmoke(x, y, intensity = 1) {
     this.add({
-      type: 'smoke', x, y, vx: (Math.random() - 0.5) * 40, vy: -18 - Math.random() * 20,
-      life: 0.8, decay: 1.2, size: 9 + Math.random() * 8, color: 'rgba(232, 228, 222, 0.42)',
+      type: 'smoke', x, y,
+      vx: (Math.random() - 0.5) * 44, vy: -16 - Math.random() * 24,
+      life: 0.75, decay: 1.15, size: (8 + Math.random() * 9) * (0.6 + intensity * 0.5),
+      color: 'rgba(235, 230, 222, 0.4)',
     });
   }
 
   spawnSplash(x, y) {
-    for (let i = 0; i < 8; i += 1) {
-      const a = Math.random() * Math.PI * 2;
+    for (let i = 0; i < 9; i += 1) {
+      const a = Math.random() * TAU;
       this.add({
-        type: 'spark', x, y, vx: Math.cos(a) * 110, vy: Math.sin(a) * 110,
-        life: 0.5, decay: 2.4, size: 2, color: '#bdeef2',
+        type: 'splash', x, y, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120,
+        life: 0.5, decay: 2.5, size: 2 + Math.random() * 2, color: '#c8f2f3',
       });
     }
   }
 
+  spawnRainSplash(x, y) {
+    this.add({
+      type: 'rain', x, y, vx: (Math.random() - 0.5) * 25, vy: 30,
+      life: 0.28, decay: 3.6, size: 3 + Math.random() * 4, color: 'rgba(205, 235, 240, 0.5)',
+    });
+  }
+
   spawnCash(x, y, amount) {
-    this.cashPickups.push({ x, y, amount, bob: Math.random() * 6 });
-    if (this.cashPickups.length > 24) this.cashPickups.shift();
+    this.cashPickups.push({ x, y, amount, bob: Math.random() * 6, age: 0 });
+    if (this.cashPickups.length > 26) this.cashPickups.shift();
+  }
+
+  spawnScuff(x, y, angle) {
+    this.scuffs.push({ x, y, angle, life: 1 });
+    if (this.scuffs.length > 80) this.scuffs.shift();
   }
 
   update(dt) {
+    this.time += dt;
     for (let i = this.particles.length - 1; i >= 0; i -= 1) {
       const p = this.particles[i];
       p.life -= p.decay * dt;
       if (p.type === 'shockwave') {
         p.radius += (p.maxRadius - p.radius) * Math.min(1, dt * 9);
       } else if (p.type === 'muzzle') {
-        // Held at the muzzle for a couple of frames.
+        // The flash holds for its very short life, then pops.
       } else {
         p.x += p.vx * dt;
         p.y += p.vy * dt;
-        p.vx *= Math.exp(-1.6 * dt);
-        p.vy = p.vy * Math.exp(-1.6 * dt) + (p.type === 'smoke' || p.type === 'fire' ? -10 * dt : 0);
+        p.vx *= Math.exp(-1.7 * dt);
+        p.vy = p.vy * Math.exp(-1.7 * dt) + (p.type === 'smoke' || p.type === 'fire' ? -16 * dt : 0);
+        if (p.type === 'casing' || p.type === 'spark') p.vy += 120 * dt;
       }
       if (p.life <= 0) this.particles.splice(i, 1);
     }
-    for (let i = this.bloodDecals.length - 1; i >= 0; i -= 1) {
-      this.bloodDecals[i].alpha -= dt * 0.012;
-      if (this.bloodDecals[i].alpha <= 0.04) this.bloodDecals.splice(i, 1);
+    for (let i = this.scuffs.length - 1; i >= 0; i -= 1) {
+      this.scuffs[i].life -= dt * 0.06;
+      if (this.scuffs[i].life <= 0) this.scuffs.splice(i, 1);
     }
-    for (const c of this.cashPickups) c.bob += dt * 3;
+    for (const c of this.cashPickups) {
+      c.bob += dt * 3;
+      c.age += dt;
+    }
+    for (const e of this.explosions) e.age += dt;
   }
 
   drainExplosions() {
-    const out = this.explosions;
-    this.explosions = [];
+    const out = this.explosions.filter((e) => e.age <= 0.02);
+    this.explosions = this.explosions.filter((e) => e.age > 0.02);
     return out;
   }
 }
 
-// =====================================================================
+// ===========================================================================
 // Vehicle
-// =====================================================================
+// ===========================================================================
 export class Vehicle {
   constructor(archetypeId, x, y, angle = 0, color = null) {
     this.config = VEHICLE_TYPES[archetypeId] || VEHICLE_TYPES.meridian;
@@ -195,7 +253,8 @@ export class Vehicle {
 
     this.width = this.config.width;
     this.length = this.config.length;
-    this.color = color || this.config.colors[Math.floor(Math.random() * this.config.colors.length)];
+    const palette = this.config.colors;
+    this.color = color || palette[Math.floor(hash2(x, y, 7) * palette.length) % palette.length];
     this.isPolice = !!this.config.isPolice;
 
     this.hp = this.config.maxHp;
@@ -205,15 +264,19 @@ export class Vehicle {
     this.isDestroyed = false;
     this.isPlayerVehicle = false;
     this.isMission = false;
-    this.aiMode = 'traffic'; // traffic | convoy | parked | police
-    this.cruiseSpeed = 170 + Math.random() * 90;
+    this.aiMode = 'traffic';
+    this.cruiseSpeed = PHYSICS_CONFIG.trafficCruiseMin + Math.random() * 90;
     this.despawnTimer = 0;
+    this.stuckTimer = 0;
+    this.lastX = x;
+    this.lastY = y;
 
     this.sirenActive = this.isPolice;
     this.sirenFlash = 0;
     this.sirenPhase = Math.random() > 0.5;
     this.headlightsOn = true;
     this.brakeLightsOn = false;
+    this.indicator = 0;
 
     this.skidIntensity = 0;
     this.skidTimer = 0;
@@ -224,6 +287,10 @@ export class Vehicle {
     this.alarm = 0;
     this.occupiedByCivilian = false;
     this.lastDriverAngle = angle;
+    this.odometer = 0;
+    this.panic = 0;
+    this.laneOffset = 0;
+    this.turnCooldown = 0;
   }
 
   get isDrivable() {
@@ -234,15 +301,20 @@ export class Vehicle {
     return this.vx * Math.cos(this.angle) + this.vy * Math.sin(this.angle);
   }
 
+  get speedAbs() {
+    return Math.hypot(this.vx, this.vy);
+  }
+
   accelerate(factor = 1, dt = 1 / 60) {
     if (!this.isDrivable) return;
     const fx = Math.cos(this.angle);
     const fy = Math.sin(this.angle);
-    const amount = this.config.accel * factor * dt;
+    const boost = this.panic > 0 ? 1.12 : 1;
+    const amount = this.config.accel * factor * boost * dt;
     this.vx += fx * amount;
     this.vy += fy * amount;
     const forward = this.vx * fx + this.vy * fy;
-    const limit = factor >= 0 ? this.config.topSpeed : this.config.reverseSpeed;
+    const limit = factor >= 0 ? this.config.topSpeed * (this.panic > 0 ? 1.08 : 1) : this.config.reverseSpeed;
     if (factor >= 0 && forward > limit) {
       this.vx -= fx * (forward - limit);
       this.vy -= fy * (forward - limit);
@@ -259,21 +331,21 @@ export class Vehicle {
     const fx = Math.cos(this.angle);
     const fy = Math.sin(this.angle);
     const forward = this.vx * fx + this.vy * fy;
-    const lateralX = this.vx - fx * forward;
-    const lateralY = this.vy - fy * forward;
-    const nextForward = forward * Math.exp(-this.config.brake * intensity * dt);
-    this.vx = fx * nextForward + lateralX * Math.exp(-2 * dt);
-    this.vy = fy * nextForward + lateralY * Math.exp(-2 * dt);
+    const latX = this.vx - fx * forward;
+    const latY = this.vy - fy * forward;
+    const next = forward * Math.exp(-this.config.brake * intensity * dt);
+    this.vx = fx * next + latX * Math.exp(-2.2 * dt);
+    this.vy = fy * next + latY * Math.exp(-2.2 * dt);
   }
 
   steer(direction) {
-    this.steerAngle = Math.max(-1, Math.min(1, direction));
+    this.steerAngle = clamp(direction, -1, 1);
   }
 
   update(dt, city, particles, audio) {
     if (this.isDestroyed) {
-      this.vx *= Math.exp(-6 * dt);
-      this.vy *= Math.exp(-6 * dt);
+      this.vx *= Math.exp(-7 * dt);
+      this.vy *= Math.exp(-7 * dt);
       this.x += this.vx * dt;
       this.y += this.vy * dt;
       return;
@@ -284,16 +356,13 @@ export class Vehicle {
     let forward = this.vx * fx + this.vy * fy;
     let lateral = -this.vx * fy + this.vy * fx;
 
-    // Steering scales with speed and reverses when backing up.
-    const speedFactor = Math.min(1, Math.abs(forward) / 135);
-    if (this.handbrake) {
-      this.steerAngle *= 0.985;
-    }
+    const speedFactor = Math.min(1, Math.abs(forward) / 130);
+    if (this.handbrake) this.steerAngle *= 0.985;
     this.angle += this.steerAngle * this.config.turnSpeed * speedFactor * Math.sign(forward || 1) * dt;
 
     const grip = this.handbrake ? this.config.driftGrip : this.config.grip;
     lateral *= Math.exp(-grip * dt);
-    forward *= Math.exp(-0.62 * dt);
+    forward *= Math.exp(-0.58 * dt);
 
     const nfx = Math.cos(this.angle);
     const nfy = Math.sin(this.angle);
@@ -301,22 +370,24 @@ export class Vehicle {
     this.vy = nfy * forward + nfx * lateral;
 
     const slip = Math.abs(lateral);
-    this.skidIntensity = Math.min(1, Math.max(0, (slip - 28) / 110));
-    if (this.skidIntensity > 0.04 && Math.abs(forward) > 40) {
+    this.skidIntensity = clamp((slip - 26) / 105, 0, 1);
+    if (this.skidIntensity > 0.05 && Math.abs(forward) > 42) {
       this.skidTimer += dt;
       if (this.skidTimer > 0.045) {
         const rearDist = -this.length * 0.34;
         const halfW = this.width * 0.34;
-        const rightX = -nfy;
-        const rightY = nfx;
-        const r1x = this.x + nfx * rearDist + rightX * halfW;
-        const r1y = this.y + nfy * rearDist + rightY * halfW;
-        const r2x = this.x + nfx * rearDist - rightX * halfW;
-        const r2y = this.y + nfy * rearDist - rightY * halfW;
-        city.addSkidMark(r1x, r1y, this.angle, this.skidIntensity * 0.55);
-        city.addSkidMark(r2x, r2y, this.angle, this.skidIntensity * 0.55);
-        particles.spawnTyreSmoke(r1x, r1y);
-        particles.spawnTyreSmoke(r2x, r2y);
+        const rx = -nfy;
+        const ry = nfx;
+        const x1 = this.x + nfx * rearDist + rx * halfW;
+        const y1 = this.y + nfy * rearDist + ry * halfW;
+        const x2 = this.x + nfx * rearDist - rx * halfW;
+        const y2 = this.y + nfy * rearDist - ry * halfW;
+        city.addSkidMark(x1, y1, this.angle, this.skidIntensity * 0.58);
+        city.addSkidMark(x2, y2, this.angle, this.skidIntensity * 0.58);
+        if (this.skidIntensity > 0.22) {
+          particles.spawnTyreSmoke(x1, y1, this.skidIntensity);
+          particles.spawnTyreSmoke(x2, y2, this.skidIntensity);
+        }
         this.skidTimer = 0;
       }
     }
@@ -329,15 +400,13 @@ export class Vehicle {
     if (hit) {
       this.x += hit.x;
       this.y += hit.y;
-      const nx = hit.x || 0;
-      const ny = hit.y || 0;
-      const len = Math.hypot(nx, ny) || 1;
-      const ux = nx / len;
-      const uy = ny / len;
+      const len = Math.hypot(hit.x, hit.y) || 1;
+      const ux = hit.x / len;
+      const uy = hit.y / len;
       const into = this.vx * ux + this.vy * uy;
       if (into < 0) {
-        this.vx -= ux * into * 1.5;
-        this.vy -= uy * into * 1.5;
+        this.vx -= ux * into * 1.55;
+        this.vy -= uy * into * 1.55;
       }
       const impactSpeed = Math.abs(into);
       if (impactSpeed > 80 && this.impactTimer <= 0) {
@@ -345,38 +414,43 @@ export class Vehicle {
         this.impactPulse = Math.min(1, impactSpeed / 520);
         this.takeDamage(impactSpeed * 0.055, particles, audio);
         particles.spawnSparks(this.x + ux * radius, this.y + uy * radius, 7, 1.1);
+        particles.spawnDust(this.x + ux * radius, this.y + uy * radius, 2, 6);
       }
       if (hit.collider.type === 'water') {
-        this.vx *= 0.72;
-        this.vy *= 0.72;
-        if (Math.random() < 0.15) particles.spawnSplash(this.x, this.y);
+        this.vx *= 0.7;
+        this.vy *= 0.7;
+        if (Math.random() < 0.16) particles.spawnSplash(this.x, this.y);
       }
     } else {
-      this.x = Math.max(20, Math.min(city.width - 20, nextX));
-      this.y = Math.max(20, Math.min(city.height - 20, nextY));
+      this.x = clamp(nextX, 20, city.width - 20);
+      this.y = clamp(nextY, 20, city.height - 20);
     }
 
     this.impactTimer -= dt;
     this.impactPulse *= Math.exp(-4 * dt);
+    this.odometer += Math.hypot(this.x - this.lastX, this.y - this.lastY);
+    this.lastX = this.x;
+    this.lastY = this.y;
 
     if (this.isPolice && this.sirenActive) {
       this.sirenFlash += dt;
-      if (this.sirenFlash > 0.18) {
+      if (this.sirenFlash > 0.17) {
         this.sirenPhase = !this.sirenPhase;
         this.sirenFlash = 0;
       }
     }
+    if (this.alarm > 0) this.alarm = Math.max(0, this.alarm - dt);
+    if (this.panic > 0) this.panic = Math.max(0, this.panic - dt);
 
-    // Damage symptoms, throttled so they do not swamp the particle pool.
     this.effectTimer -= dt;
     if (this.effectTimer <= 0) {
       this.effectTimer = 0.11;
       const hx = this.x + nfx * this.length * 0.33;
       const hy = this.y + nfy * this.length * 0.33;
-      if (this.hp < this.maxHp * 0.5) particles.spawnSmoke(hx, hy, 'rgba(185, 185, 190, 0.45)', 1, 7, 24);
+      if (this.hp < this.maxHp * 0.5) particles.spawnSmoke(hx, hy, 'rgba(185, 185, 190, 0.4)', 1, 7, 24);
       if (this.hp < this.maxHp * 0.24) {
         particles.spawnFire(hx, hy, 1, 8);
-        particles.spawnSmoke(hx, hy, 'rgba(28, 26, 31, 0.72)', 1, 12, 34);
+        particles.spawnSmoke(hx, hy, 'rgba(28, 26, 31, 0.7)', 1, 12, 34);
       }
     }
   }
@@ -396,15 +470,15 @@ export class Vehicle {
     this.vy *= 0.2;
     if (particles) particles.spawnExplosion(this.x, this.y);
     if (audio) audio.playExplosion();
-    if (this.driver && this.driver.takeDamage && this.driver !== null && this.driver.isPlayer !== false) {
+    if (this.driver && this.driver.takeDamage && this.driver.isPlayer !== false) {
       this.driver.takeDamage(120, particles, audio);
     }
   }
 }
 
-// =====================================================================
+// ===========================================================================
 // Player
-// =====================================================================
+// ===========================================================================
 export class Player {
   constructor(x, y) {
     this.x = x;
@@ -412,13 +486,15 @@ export class Player {
     this.vx = 0;
     this.vy = 0;
     this.angle = -Math.PI / 2;
+    this.facing = 2;
     this.radius = PHYSICS_CONFIG.playerRadius;
 
     this.health = 100;
     this.maxHealth = 100;
-    this.armor = 50;
+    this.armor = 25;
     this.maxArmor = 100;
     this.money = 500;
+    this.score = 0;
 
     this.inventory = ['fists', 'pistol', 'smg', 'shotgun', 'rifle'];
     this.currentWeaponIndex = 1;
@@ -443,9 +519,11 @@ export class Player {
     this.rollTimer = 0;
     this.rollAngle = 0;
     this.walkCycle = 0;
+    this.walkPhase = 0;
     this.footstepTimer = 0;
     this.sprinting = false;
     this.moving = false;
+    this.animState = 'idle';
     this.isPlayer = true;
   }
 
@@ -462,7 +540,7 @@ export class Player {
       this.currentWeaponIndex = index;
       this.isReloading = false;
       this.reloadTimer = 0;
-      this.fireCooldown = Math.max(this.fireCooldown, 0.12);
+      this.fireCooldown = Math.max(this.fireCooldown, 0.1);
     }
   }
 
@@ -475,17 +553,18 @@ export class Player {
     const config = WEAPON_CONFIG[id];
     if (!config) return;
     const mag = this.ammo[id];
-    const add = config.clipSize * clips;
-    mag.reserve = Math.min(config.maxReserve, mag.reserve + add);
+    if (!mag) return;
+    mag.reserve = Math.min(config.maxReserve, mag.reserve + config.clipSize * clips);
     if (mag.clip <= 0) mag.clip = Math.min(config.clipSize, mag.reserve);
     this.setWeapon(this.inventory.indexOf(id));
   }
 
   takeDamage(amount, particles, audio, dir = null) {
     if (this.isRolling || this.iFrames > 0 || this.health <= 0) return;
-    this.iFrames = 0.28;
+    this.iFrames = 0.26;
     this.hitFlash = 1;
-    if (particles) particles.spawnBlood(this.x, this.y, 6, dir);
+    this.lastDamageAt = 0;
+    if (particles) particles.spawnHit(this.x, this.y, 6, dir);
     if (this.armor > 0) {
       const absorbed = Math.min(this.armor, amount * 0.68);
       this.armor -= absorbed;
@@ -494,7 +573,15 @@ export class Player {
       this.health -= amount;
     }
     this.health = Math.max(0, this.health);
-    if (audio && Math.random() > 0.4) audio.playHurt();
+    if (audio && Math.random() > 0.35) audio.playHurt();
+  }
+
+  heal(amount) {
+    this.health = Math.min(this.maxHealth, this.health + amount);
+  }
+
+  addArmor(amount) {
+    this.armor = Math.min(this.maxArmor, this.armor + amount);
   }
 
   reload(audio) {
@@ -523,6 +610,7 @@ export class Player {
     this.isRolling = true;
     this.rollTimer = PHYSICS_CONFIG.playerRollDuration;
     this.rollAngle = Math.atan2(my, mx);
+    this.animState = 'roll';
   }
 
   tickTimers(dt) {
@@ -539,16 +627,18 @@ export class Player {
   update(dt, input, city, particles, audio) {
     this.tickTimers(dt);
 
-    if (this.hotwire) {
-      return;
-    }
-
     if (this.isInVehicle) {
       this.x = this.vehicle.x;
       this.y = this.vehicle.y;
       this.angle = this.vehicle.angle;
       this.vx = this.vehicle.vx;
       this.vy = this.vehicle.vy;
+      this.facing = facingFromAngle(this.angle);
+      this.animState = 'drive';
+      return;
+    }
+    if (this.hotwire) {
+      this.animState = 'hotwire';
       return;
     }
 
@@ -556,8 +646,13 @@ export class Player {
       this.rollTimer -= dt;
       this.vx = Math.cos(this.rollAngle) * PHYSICS_CONFIG.playerRollSpeed;
       this.vy = Math.sin(this.rollAngle) * PHYSICS_CONFIG.playerRollSpeed;
-      if (Math.random() < 0.55) particles.spawnFootstep(this.x, this.y);
-      if (this.rollTimer <= 0) this.isRolling = false;
+      this.angle = this.rollAngle;
+      this.facing = facingFromAngle(this.angle);
+      if (particles && Math.random() < 0.55) particles.spawnFootstep(this.x, this.y);
+      if (this.rollTimer <= 0) {
+        this.isRolling = false;
+        this.animState = 'idle';
+      }
     } else {
       let mx = 0;
       let my = 0;
@@ -577,20 +672,26 @@ export class Player {
         const speed = this.sprinting ? PHYSICS_CONFIG.playerSprintSpeed : PHYSICS_CONFIG.playerWalkSpeed;
         this.vx = mx * speed;
         this.vy = my * speed;
-        this.walkCycle += dt * (this.sprinting ? 15 : 9);
+        const rate = this.sprinting ? 15 : 9.5;
+        this.walkCycle += dt * rate;
+        this.walkPhase = (this.walkPhase + dt * rate) % (Math.PI * 2);
         this.footstepTimer += dt;
         if (this.footstepTimer > (this.sprinting ? 0.2 : 0.31)) {
-          particles.spawnFootstep(this.x, this.y);
+          if (particles) particles.spawnFootstep(this.x, this.y);
           this.footstepTimer = 0;
           if (audio) audio.playFootstep();
         }
         this.moving = true;
+        this.animState = this.sprinting ? 'run' : 'walk';
       } else {
         this.vx *= Math.exp(-11 * dt);
         this.vy *= Math.exp(-11 * dt);
         this.moving = false;
+        this.animState = this.isReloading ? 'reload' : 'idle';
       }
       this.angle = Math.atan2(input.mouse.worldY - this.y, input.mouse.worldX - this.x);
+      const moveFacing = facingFromAngle(len > 0 ? Math.atan2(my, mx) : this.angle);
+      this.facing = this.moving ? moveFacing : facingFromAngle(this.angle);
     }
 
     const nextX = this.x + this.vx * dt;
@@ -600,13 +701,13 @@ export class Player {
       this.x += hit.x;
       this.y += hit.y;
     } else {
-      this.x = Math.max(this.radius, Math.min(city.width - this.radius, nextX));
-      this.y = Math.max(this.radius, Math.min(city.height - this.radius, nextY));
+      this.x = clamp(nextX, this.radius, city.width - this.radius);
+      this.y = clamp(nextY, this.radius, city.height - this.radius);
     }
 
-    for (let i = particles.cashPickups.length - 1; i >= 0; i -= 1) {
+    for (let i = (particles?.cashPickups.length ?? 0) - 1; i >= 0; i -= 1) {
       const c = particles.cashPickups[i];
-      if (Math.hypot(this.x - c.x, this.y - c.y) < 38) {
+      if (Math.hypot(this.x - c.x, this.y - c.y) < 40) {
         this.money += c.amount;
         if (audio) audio.playCash();
         particles.cashPickups.splice(i, 1);
@@ -615,12 +716,12 @@ export class Player {
   }
 }
 
-// =====================================================================
+// ===========================================================================
 // Pedestrian
-// =====================================================================
-const SHIRTS = ['#b45b67', '#4c8f94', '#b7a552', '#618668', '#b17a50', '#cfc7b8', '#3b3942', '#7d6c8f'];
-const PANTS = ['#3b4a63', '#556069', '#66513f', '#2c2c32', '#898887', '#455767'];
-const SKIN = ['#e2b58e', '#c99366', '#a87048', '#82563a', '#e6c3a2'];
+// ===========================================================================
+const SHIRTS = ['#b45b67', '#4c8f94', '#b7a552', '#618668', '#b17a50', '#cfc7b8', '#3b3942', '#7d6c8f', '#d78b55'];
+const PANTS = ['#3b4a63', '#556069', '#66513f', '#2c2c32', '#898887', '#455767', '#6b4e3d'];
+const SKIN = ['#e2b58e', '#c99366', '#a87048', '#82563a', '#e6c3a2', '#f0c7a2'];
 
 export class Pedestrian {
   constructor(x, y, rng = Math.random, lane = null) {
@@ -628,18 +729,20 @@ export class Pedestrian {
     this.y = y;
     this.vx = 0;
     this.vy = 0;
-    this.angle = lane ? lane.angle : rng() * Math.PI * 2;
+    this.angle = lane ? lane.angle : rng() * TAU;
+    this.facing = facingFromAngle(this.angle);
     this.lane = lane;
     this.speed = 52 + rng() * 26;
     this.baseSpeed = this.speed;
-    this.health = 38;
-    this.maxHealth = 38;
+    this.health = 40;
+    this.maxHealth = 40;
     this.isDead = false;
     this.state = 'walk';
     this.stateTimer = 2 + rng() * 3;
     this.crossTimer = 0;
     this.radius = 11;
     this.hitFlash = 0;
+    this.reactTimer = 0;
 
     this.shirt = SHIRTS[Math.floor(rng() * SHIRTS.length)];
     this.pants = PANTS[Math.floor(rng() * PANTS.length)];
@@ -649,18 +752,21 @@ export class Pedestrian {
     this.bag = !this.umbrella && rng() < 0.38;
     this.hat = rng() < 0.18;
     this.bob = rng() * 6;
+    this.walkPhase = rng() * TAU;
     this.panicTimer = 0;
     this.deadAngle = 0;
     this.rng = rng;
     this.isPedestrian = true;
     this.robbed = false;
+    this.isCop = false;
+    this.speaking = 0;
   }
 
   takeDamage(amount, particles, audio, dir = null) {
     if (this.isDead) return;
     this.health -= amount;
     this.hitFlash = 1;
-    if (particles) particles.spawnBlood(this.x, this.y, 4, dir);
+    if (particles) particles.spawnHit(this.x, this.y, 4, dir);
     if (this.health <= 0) {
       this.die(particles);
     } else {
@@ -676,7 +782,7 @@ export class Pedestrian {
     this.vy = 0;
     this.deadAngle = this.angle + Math.PI / 2 + (Math.random() - 0.5);
     if (particles) {
-      particles.spawnBlood(this.x, this.y, 10);
+      particles.spawnHit(this.x, this.y, 12);
       particles.spawnCash(this.x, this.y, 15 + Math.floor(Math.random() * 65));
     }
   }
@@ -687,24 +793,38 @@ export class Pedestrian {
     this.panicTimer = 4 + Math.random() * 3;
     this.speed = 145 + Math.random() * 45;
     this.angle = Math.atan2(this.y - y, this.x - x) + (Math.random() - 0.5) * 0.5;
+    this.facing = facingFromAngle(this.angle);
     this.vx = Math.cos(this.angle) * this.speed;
     this.vy = Math.sin(this.angle) * this.speed;
   }
 
   panic(fromX, fromY, radius) {
     if (this.isDead) return;
-    if (Math.hypot(this.x - fromX, this.y - fromY) < radius) {
-      this.fleeFrom(fromX, fromY);
-    }
+    if (Math.hypot(this.x - fromX, this.y - fromY) < radius) this.fleeFrom(fromX, fromY);
+  }
+
+  reactToCar(carX, carY, carAngle) {
+    if (this.isDead || this.state === 'flee') return;
+    this.state = 'react';
+    this.reactTimer = 0.55;
+    this.angle = Math.atan2(this.y - carY, this.x - carX);
+    this.facing = facingFromAngle(this.angle);
+    this.vx = Math.cos(this.angle) * 120;
+    this.vy = Math.sin(this.angle) * 120;
   }
 
   update(dt, city, particles) {
     this.hitFlash = Math.max(0, this.hitFlash - dt * 3);
     if (this.isDead) return;
 
+    if (this.state === 'react') {
+      this.reactTimer -= dt;
+      if (this.reactTimer <= 0) this.fleeFrom(this.x - Math.cos(this.angle) * 20, this.y - Math.sin(this.angle) * 20);
+    }
+
     if (this.state === 'flee') {
       this.panicTimer -= dt;
-      this.speed = Math.max(this.speed - dt * 10, 70);
+      this.speed = Math.max(this.speed - dt * 10, 72);
       if (this.panicTimer <= 0) {
         this.state = 'walk';
         this.speed = this.baseSpeed;
@@ -733,7 +853,7 @@ export class Pedestrian {
         this.angle = this.lane.dir > 0 ? 0 : Math.PI;
         const lim = this.lane.dir > 0 ? Math.min(road.x2, 2660) : road.x1;
         if ((this.lane.dir > 0 && this.x > lim - 24) || (this.lane.dir < 0 && this.x < lim + 24) || this.stateTimer <= 0) {
-          if (this.city_nearIntersection(city, 70) && Math.random() < 0.4) {
+          if (this.nearSignal(city, 70) && Math.random() < 0.45) {
             this.state = 'cross';
             this.crossTimer = 2.1;
             this.lane.side = -this.lane.side;
@@ -748,7 +868,7 @@ export class Pedestrian {
         this.angle = this.lane.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
         const lim = this.lane.dir > 0 ? 3170 : 30;
         if ((this.lane.dir > 0 && this.y > lim - 24) || (this.lane.dir < 0 && this.y < lim + 24) || this.stateTimer <= 0) {
-          if (this.city_nearIntersection(city, 70) && Math.random() < 0.4) {
+          if (this.nearSignal(city, 70) && Math.random() < 0.45) {
             this.state = 'cross';
             this.crossTimer = 2.1;
             this.lane.side = -this.lane.side;
@@ -788,20 +908,22 @@ export class Pedestrian {
       this.y += hit.y;
       if (this.state === 'flee') this.angle += 0.8 + (Math.random() - 0.5) * 0.6;
     } else {
-      this.x = Math.max(10, Math.min(city.width - 10, nextX));
-      this.y = Math.max(10, Math.min(city.height - 10, nextY));
+      this.x = clamp(nextX, 10, city.width - 10);
+      this.y = clamp(nextY, 10, city.height - 10);
     }
 
     this.bob += dt * (this.state === 'flee' ? 12 : 6);
-    if (this.state === 'flee' && Math.random() < 0.03) {
-      particles.spawnFootstep(this.x, this.y);
-    }
+    this.walkPhase = (this.walkPhase + dt * (this.state === 'flee' ? 12 : 6.5)) % TAU;
+    this.facing = facingFromAngle(this.state === 'flee' ? this.angle : (this.lane ? this.angle : this.angle));
+    if (this.state === 'flee' && Math.random() < 0.03) particles.spawnFootstep(this.x, this.y);
   }
 
-  city_nearIntersection(city, radius) {
+  nearSignal(city, radius) {
     for (const i of city.intersections) {
-      if (Math.hypot(this.x - i.x, this.y - i.y) < radius) return true;
+      if (Math.abs(this.x - i.x) < radius && Math.abs(this.y - i.y) < radius) return true;
     }
     return false;
   }
 }
+
+export { facingFromAngle, PALETTE };

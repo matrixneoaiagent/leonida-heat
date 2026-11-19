@@ -1,4 +1,4 @@
-// Leonida Heat - browser entry.
+// Leonida Heat v3 - browser entry.
 // Boots the game, honours ?shot=name&seed=N (fresh seeded world, scripted
 // play, frozen frame), wires the test handle, keeps the canvas focused and
 // letterboxed, and surfaces any boot error in the page instead of a blank tab.
@@ -67,9 +67,8 @@ if (!canvas) {
     // Responsive letterboxing: the backing store stays 1280 x 720; the CSS
     // box is scaled to fit while preserving the 16:9 aspect exactly.
     function resize() {
-      const pad = 0;
-      const availW = Math.max(320, window.innerWidth - pad);
-      const availH = Math.max(180, window.innerHeight - pad);
+      const availW = Math.max(320, window.innerWidth);
+      const availH = Math.max(180, window.innerHeight);
       const scale = Math.min(availW / 1280, availH / 720);
       canvas.style.width = `${Math.floor(1280 * scale)}px`;
       canvas.style.height = `${Math.floor(720 * scale)}px`;
@@ -100,6 +99,7 @@ if (!canvas) {
     focusCanvas();
     if (loading) loading.classList.add('hidden');
     document.body.classList.add('ready');
+    document.body.dataset.version = GAME_VERSION;
     if (statusLine) statusLine.textContent = shot ? `Scene ready: ${shot}` : 'Costa Sol is open.';
   }
 }

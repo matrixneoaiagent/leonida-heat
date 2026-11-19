@@ -1,13 +1,15 @@
-// Leonida Heat - the top-down render pipeline.
-// Ground and architecture are baked into cached city layers (a full-detail
-// layer and a lighter far layer). Everything that moves is drawn every frame
-// in a single depth pass: soft shadows, distinct car silhouettes, four-way
-// pedestrian cycles, particles and the neon of a wet Costa Sol night.
+// Leonida Heat v3 - the top-down render pipeline.
+// Static Costa Sol is baked into a full-detail layer and a lighter far layer.
+// Every moving thing is drawn per frame in a depth pass: long sun shadows that
+// swing with the clock, soft contact shadows, per-type car silhouettes with
+// damage states, pedestrian walk cycles, particles and neon bloom. Rain wets
+// the streets; puddles mirror the lights; palms lean into the sea wind.
 //
-// Layer order:
-//   static city -> animated water/shore -> markings & skid -> wet reflections
-//   -> ground light pools -> actor shadows -> actor depth pass -> bullets
-//   -> particles -> street neon -> weather -> colour grade & vignette.
+// Order:
+//   baked city -> dynamic building shadows -> water/shore -> road life
+//   -> wet reflections -> light pools -> search cones -> actor shadows
+//   -> depth pass -> bullets/grenades -> particles -> neon bloom -> markers
+//   -> weather -> colour grade/sun/moon -> vignette -> reticle.
 
 import { PALETTE, districtAt } from './config.js';
 
@@ -52,8 +54,8 @@ export class Renderer {
     this.frame = 0;
     this.layers = new Map();
     this.layerCity = null;
-    this.lastWeather = 'clear';
     this.rainSeed = 0;
+    this.bloomCanvas = null;
   }
 
   // =================================================================
@@ -66,7 +68,7 @@ export class Renderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
-    ctx.fillStyle = '#0d1014';
+    ctx.fillStyle = this.ambientBase(game);
     ctx.fillRect(0, 0, this.width, this.height);
 
     const shake = cam.shake || 0;
@@ -82,22 +84,25 @@ export class Renderer {
     const halfH = this.height / 2 / cam.zoom;
     this.view = {
       x: cam.x - halfW, y: cam.y - halfH,
-      w: cam.x + halfW, h: cam.y + halfH,
+      w: halfW * 2, h: halfH * 2,
       x2: cam.x + halfW, y2: cam.y + halfH,
     };
 
     this.drawStatic(game);
+    this.drawBuildingShadows(game);
+    this.drawAmbientWash(game);
     this.drawWaterAnimation(game);
     this.drawShore(game);
     this.drawRoadLife(game);
-    this.drawWetRoads(game);
-    this.drawPalms(game);
-    this.drawSearchCones(game);
+    this.drawRampsLive(game);
+    this.drawWetReflections(game);
     this.drawGroundLighting(game);
-    this.drawScuffs(game);
+    this.drawSearchCones(game);
+    this.drawPalms(game);
     this.drawShadows(game);
     this.drawDepthPass(game);
     this.drawBullets(game);
+    this.drawGrenades(game);
     this.drawParticles(game);
     this.drawMarkers(game);
     this.drawNeon(game);
@@ -108,8 +113,83 @@ export class Renderer {
     this.drawAtmosphere(game);
   }
 
+  inView(x, y, pad = 80) {
+    const v = this.view;
+    return x > v.x - pad && x < v.x2 + pad && y > v.y - pad && y < v.y2 + pad;
+  }
+
   // =================================================================
-  // Cached city layers, one per zoom band
+  // Time-of-day light model
+  // =================================================================
+  lightInfo(game) {
+    const t = ((game.timeOfDay ?? 0.5) % 1 + 1) % 1;
+    const sunAlt = Math.sin((t - 0.25) * TAU); // 0 at 06:00, 1 at noon, -1 at midnight
+    const daylight = smooth(-0.16, 0.2, sunAlt);
+    const dark = 1 - daylight;
+    const dawn = Math.exp(-Math.pow((t - 0.255) / 0.05, 2));
+    const dusk = Math.exp(-Math.pow((t - 0.715) / 0.055, 2));
+    const night = smooth(0.25, -0.35, sunAlt);
+    const sunAzimuth = (t - 0.25) * Math.PI * 2 - Math.PI / 2;
+    const shadowLen = clamp(0.25 + (1 - clamp(sunAlt, 0, 1)) * 2.6, 0.25, 2.9);
+    let sunColor = '#fff3dc';
+    if (dawn > 0.25) sunColor = '#ffb6a0';
+    else if (dusk > 0.25) sunColor = '#ff9a62';
+    else if (daylight < 0.2) sunColor = '#9db8ff';
+    return { t, sunAlt, daylight, dark, dawn, dusk, night, sunAzimuth, shadowLen, sunColor };
+  }
+
+  ambientBase(game) {
+    const li = this.lightInfo(game);
+    if (li.dark > 0.55) return '#0b1020';
+    if (li.dusk > 0.4) return '#2a1c28';
+    if (li.dawn > 0.4) return '#322832';
+    return '#6e7f66';
+  }
+
+  drawBuildingShadows(game) {
+    const li = this.lightInfo(game);
+    if (li.daylight < 0.12) return;
+    const ctx = this.ctx;
+    const ox = Math.cos(li.sunAzimuth + Math.PI) * li.shadowLen * 12;
+    const oy = Math.sin(li.sunAzimuth + Math.PI) * li.shadowLen * 12;
+    const alpha = clamp(0.1 + li.daylight * 0.13, 0, 0.22);
+    ctx.save();
+    for (const b of game.city.buildings) {
+      if (!this.inView(b.x, b.y, 160)) continue;
+      const h = clamp((b.height || 16) / 90, 0.3, 1.2);
+      ctx.fillStyle = `rgba(18, 20, 28, ${alpha * h})`;
+      roundRect(ctx, b.x - b.w / 2 + ox, b.y - b.h / 2 + oy, b.w, b.h, 3);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // The baked city is painted for daylight. This wash sits *under* every
+  // dynamic light and actor, so night stays dark while neon, headlights,
+  // shadows and people remain vivid. A second, lighter grade at the end ties
+  // the frame together.
+  drawAmbientWash(game) {
+    const li = this.lightInfo(game);
+    const ctx = this.ctx;
+    const v = this.view;
+    if (li.dark > 0.01) {
+      ctx.fillStyle = `rgba(9, 15, 42, ${li.dark * 0.66})`;
+      ctx.fillRect(v.x, v.y, v.w, v.h);
+    }
+    if (li.dusk > 0.18) {
+      ctx.fillStyle = `rgba(255, 112, 66, ${li.dusk * 0.11})`;
+      ctx.fillRect(v.x, v.y, v.w, v.h);
+      ctx.fillStyle = `rgba(90, 36, 100, ${li.dusk * 0.075})`;
+      ctx.fillRect(v.x, v.y, v.w, v.h);
+    }
+    if (li.dawn > 0.18) {
+      ctx.fillStyle = `rgba(255, 154, 172, ${li.dawn * 0.08})`;
+      ctx.fillRect(v.x, v.y, v.w, v.h);
+    }
+  }
+
+  // =================================================================
+  // Cached city layers
   // =================================================================
   ensureLayer(game, detail) {
     if (this.layerCity !== game.city) {
@@ -139,6 +219,7 @@ export class Renderer {
     this.bakeRoads(game);
     this.bakeBlocks(game);
     this.bakeProps(game);
+    this.bakeRamps(game);
     this.bakeBuildings(game);
     this.ctx = prevCtx;
     this.view = prevView;
@@ -149,7 +230,7 @@ export class Renderer {
   }
 
   drawStatic(game) {
-    const detail = game.camera.zoom >= 1.62;
+    const detail = game.camera.zoom >= 1.35;
     const layer = this.ensureLayer(game, detail);
     const v = this.view;
     const s = layer.scale;
@@ -165,28 +246,18 @@ export class Renderer {
     );
   }
 
-  inView(x, y, pad = 80) {
-    const v = this.view;
-    return x > v.x - pad && x < v.x2 + pad && y > v.y - pad && y < v.y2 + pad;
-  }
-
-  lightLevel(game) {
-    return smooth(0.5, 0.76, game.timeOfDay || 0.46);
-  }
-
   // =================================================================
-  // Base ground, coast and water (static)
+  // Baked ground, coast and piers
   // =================================================================
   bakeGround(game) {
     const ctx = this.ctx;
     const grad = ctx.createLinearGradient(0, 0, 3200, 3200);
-    grad.addColorStop(0, '#71825f');
+    grad.addColorStop(0, '#72825f');
     grad.addColorStop(0.5, '#66755d');
     grad.addColorStop(1, '#5b6d5b');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 3200, 3200);
 
-    // A subtle grid of drainage cuts under the city.
     ctx.strokeStyle = 'rgba(40, 48, 38, 0.08)';
     ctx.lineWidth = 3;
     for (let g = 200; g < 3200; g += 400) {
@@ -198,16 +269,20 @@ export class Renderer {
       ctx.stroke();
     }
 
-    // Ocean.
+    // Shallow inlet west of the marina.
+    ctx.fillStyle = 'rgba(53, 128, 140, 0.35)';
+    ctx.beginPath();
+    ctx.ellipse(2690, 2290, 58, 150, 0.08, 0, TAU);
+    ctx.fill();
+
     const ocean = ctx.createLinearGradient(2712, 0, 3200, 0);
     ocean.addColorStop(0, '#42b4b8');
-    ocean.addColorStop(0.16, '#2f99aa');
+    ocean.addColorStop(0.14, '#2f99aa');
     ocean.addColorStop(0.55, '#1f7590');
     ocean.addColorStop(1, '#15556f');
     ctx.fillStyle = ocean;
     ctx.fillRect(2712, 0, 488, 3200);
 
-    // Wet band and sand.
     ctx.fillStyle = '#c9b489';
     ctx.fillRect(2680, 0, 36, 3200);
     const sand = ctx.createLinearGradient(2480, 0, 2712, 0);
@@ -235,15 +310,12 @@ export class Renderer {
     ctx.fillStyle = 'rgba(80, 52, 32, 0.18)';
     for (let y = 28; y < 3200; y += 118) ctx.fillRect(2504, y, 3, 10);
 
-    // Sand speckles.
     for (const speck of game.city.sandSpecks) {
       ctx.fillStyle = `rgba(122, 91, 54, ${speck.a})`;
       ctx.beginPath();
       ctx.arc(speck.x, speck.y, speck.r, 0, TAU);
       ctx.fill();
     }
-
-    // Foam line.
     for (const f of game.city.foamDots) {
       ctx.fillStyle = `rgba(240, 252, 250, ${f.a})`;
       ctx.beginPath();
@@ -251,7 +323,7 @@ export class Renderer {
       ctx.fill();
     }
 
-    // Piers and marina boards.
+    // Piers.
     for (const p of game.city.piers) {
       const left = p.x - p.w / 2;
       const top = p.y - p.h / 2;
@@ -271,7 +343,6 @@ export class Renderer {
       }
       ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
       ctx.fillRect(left + 2, top + 2, p.w - 4, 3);
-      // Post shadows along the side.
       ctx.fillStyle = 'rgba(62, 40, 22, 0.35)';
       for (let x = left + 10; x < left + p.w; x += 34) {
         ctx.fillRect(x, top + p.h - 2, 4, 6);
@@ -287,7 +358,6 @@ export class Renderer {
       const w = road.horizontal ? Math.abs(road.x2 - road.x1) : road.width;
       const h = road.horizontal ? road.width : Math.abs(road.y2 - road.y1);
 
-      // Shoulder / gutter.
       ctx.fillStyle = 'rgba(64, 58, 62, 0.55)';
       ctx.fillRect(x - 5, y - 5, w + 10, h + 10);
 
@@ -300,7 +370,6 @@ export class Renderer {
       ctx.fillStyle = grad;
       ctx.fillRect(x, y, w, h);
 
-      // Edge lines.
       ctx.fillStyle = 'rgba(236, 225, 198, 0.16)';
       if (road.horizontal) {
         ctx.fillRect(x, y + 3, w, 2);
@@ -310,22 +379,20 @@ export class Renderer {
         ctx.fillRect(x + w - 5, y, 2, h);
       }
 
-      // Asphalt grain.
       ctx.fillStyle = 'rgba(255, 255, 255, 0.022)';
       for (let g = 0; g < 8; g += 1) {
-        const gy = y + 4 + ((g * 97 + road.x1 * 0.13) % (h - 8));
+        const gy = y + 4 + ((g * 97 + road.x1 * 0.13) % Math.max(1, h - 8));
         if (road.horizontal) ctx.fillRect(x, gy, w, 1);
-        else ctx.fillRect(x + 4 + ((g * 83) % (w - 8)), y, 1, h);
+        else ctx.fillRect(x + 4 + ((g * 83) % Math.max(1, w - 8)), y, 1, h);
       }
 
-      // Lane paint: centre double line plus dashed lane dividers.
       if (road.horizontal) {
         const cy = y + h / 2;
         ctx.fillStyle = 'rgba(246, 211, 112, 0.7)';
         ctx.fillRect(x, cy - 2, w, 1.5);
         ctx.fillRect(x, cy + 1, w, 1.5);
         if (road.lanes >= 4) {
-          ctx.strokeStyle = 'rgba(245, 239, 224, 0.66)';
+          ctx.strokeStyle = 'rgba(245, 239, 224, 0.62)';
           ctx.lineWidth = 2;
           ctx.setLineDash([18, 22]);
           for (const off of [-h * 0.24, h * 0.24]) {
@@ -342,7 +409,7 @@ export class Renderer {
         ctx.fillRect(cx - 2, y, 1.5, h);
         ctx.fillRect(cx + 1, y, 1.5, h);
         if (road.lanes >= 4) {
-          ctx.strokeStyle = 'rgba(245, 239, 224, 0.66)';
+          ctx.strokeStyle = 'rgba(245, 239, 224, 0.62)';
           ctx.lineWidth = 2;
           ctx.setLineDash([18, 22]);
           for (const off of [-w * 0.24, w * 0.24]) {
@@ -354,11 +421,9 @@ export class Renderer {
           ctx.setLineDash([]);
         }
       }
-
       this.bakeRoadName(ctx, road);
     }
 
-    // Patches and cracks.
     for (const p of game.city.roadPatches) {
       ctx.save();
       ctx.translate(p.x, p.y);
@@ -379,7 +444,6 @@ export class Renderer {
       ctx.stroke();
     }
 
-    // Intersections: clear box, crosswalks, stop lines, manholes.
     for (const inter of game.city.intersections) {
       const hw = inter.vWidth / 2;
       const hh = inter.hWidth / 2;
@@ -415,7 +479,6 @@ export class Renderer {
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(road.horizontal ? 0 : Math.PI / 2);
-      ctx.letterSpacing = '2px';
       ctx.fillText(road.name.toUpperCase(), 0, 0);
       ctx.restore();
     }
@@ -426,14 +489,12 @@ export class Renderer {
     const hw = inter.vWidth / 2;
     const hh = inter.hWidth / 2;
     ctx.fillStyle = 'rgba(245, 240, 225, 0.72)';
-    // Across the horizontal road, either side of the junction.
     for (const sign of [-1, 1]) {
       const bx = inter.x + sign * (hw + 14);
       for (let i = -3; i <= 3; i += 1) {
         ctx.fillRect(bx - 2, inter.y + i * (inter.hWidth / 8) - 3, 9, 4);
       }
     }
-    // Across the vertical road.
     for (const sign of [-1, 1]) {
       const by = inter.y + sign * (hh + 14);
       for (let i = -3; i <= 3; i += 1) {
@@ -443,7 +504,7 @@ export class Renderer {
   }
 
   // =================================================================
-  // Blocks, sidewalks, parks, parking
+  // Blocks
   // =================================================================
   bakeBlocks(game) {
     const ctx = this.ctx;
@@ -454,7 +515,6 @@ export class Renderer {
       const h = block.h;
       const d = districtAt(block.x, block.y);
 
-      // Sidewalk slab.
       ctx.fillStyle = d.character === 'downtown' ? '#cfc6b4' : PALETTE.sidewalk;
       roundRect(ctx, left, top, w, h, 3);
       ctx.fill();
@@ -462,7 +522,6 @@ export class Renderer {
       ctx.lineWidth = 1.2;
       ctx.stroke();
 
-      // Paving seams.
       ctx.strokeStyle = 'rgba(111, 96, 75, 0.13)';
       ctx.lineWidth = 1;
       for (let gx = left + 12; gx < left + w; gx += 26) {
@@ -478,7 +537,6 @@ export class Renderer {
         ctx.stroke();
       }
 
-      // Slab replacements.
       for (let i = 0; i < 4; i += 1) {
         const h1 = game.city.hash(left + i * 37, top + i * 71, 3);
         const h2 = game.city.hash(top + i * 53, left + i * 29, 4);
@@ -486,7 +544,6 @@ export class Renderer {
         ctx.fillRect(left + 8 + h1 * Math.max(1, w - 60), top + 8 + h2 * Math.max(1, h - 40), 26 + h2 * 26, 11 + h1 * 12);
       }
 
-      // Curb shading toward the road.
       ctx.fillStyle = 'rgba(106, 92, 72, 0.22)';
       ctx.fillRect(left, top, w, 4);
       ctx.fillRect(left, top, 4, h);
@@ -511,7 +568,6 @@ export class Renderer {
         ctx.fillRect(ix, iy, iw, ih);
         ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
         ctx.fillRect(ix, iy, iw, 3);
-        // Alleys cut through a block.
         for (const alley of game.city.alleys) {
           if (Math.abs(alley.x - block.x) < block.w / 2 && Math.abs(alley.y - block.y) < block.h / 2) {
             ctx.fillStyle = 'rgba(52, 48, 50, 0.86)';
@@ -526,7 +582,6 @@ export class Renderer {
       ctx.lineWidth = 1.4;
       ctx.strokeRect(ix + 0.5, iy + 0.5, iw - 1, ih - 1);
 
-      // Hydrants and bins on the corners.
       if (w > 120 && h > 120) {
         ctx.fillStyle = '#c8593f';
         ctx.beginPath();
@@ -558,8 +613,7 @@ export class Renderer {
       ctx.lineWidth = 1;
       ctx.strokeRect(ix + iw / 2 - 7.5, iy + ih / 2 - 7.5, 15, 15);
     }
-    if (block.rng < 0) return;
-    if (game.city.hash(block.x, block.y, 12) > 0.6) {
+    if (game.city.hash(block.x, block.y, 12) > 0.52) {
       const px = ix + iw * 0.62;
       const py = iy + ih * 0.38;
       ctx.fillStyle = 'rgba(58, 132, 148, 0.9)';
@@ -582,7 +636,6 @@ export class Renderer {
       ctx.fillRect(-8, 1, 16, 2);
       ctx.restore();
     }
-    // Park lamps.
     ctx.fillStyle = '#3c423d';
     for (const [lx, ly] of [[ix + 14, iy + 14], [ix + iw - 14, iy + 14], [ix + 14, iy + ih - 14], [ix + iw - 14, iy + ih - 14]]) {
       ctx.beginPath();
@@ -609,7 +662,6 @@ export class Renderer {
       ctx.lineTo(ix + iw - 6, y);
       ctx.stroke();
     }
-    // Parking bumpers.
     ctx.fillStyle = 'rgba(216, 205, 182, 0.6)';
     for (let x = ix + 8; x < ix + iw - 12; x += 28) ctx.fillRect(x, iy + ih - 18, 12, 3);
     void block;
@@ -640,13 +692,11 @@ export class Renderer {
   }
 
   // =================================================================
-  // Props (static)
+  // Props
   // =================================================================
   bakeProps(game) {
     const ctx = this.ctx;
-    for (const prop of game.city.props) {
-      this.bakeProp(ctx, game, prop);
-    }
+    for (const prop of game.city.props) this.bakeProp(ctx, game, prop);
     for (const b of game.city.billboards) this.bakeBillboard(ctx, b);
     for (const light of game.city.streetlights) {
       ctx.fillStyle = 'rgba(20, 18, 22, 0.22)';
@@ -775,6 +825,11 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(prop.x - 3, prop.y - 3, prop.r * 0.3, 0, TAU);
       ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(prop.x, prop.y, prop.r * 0.86, 0.3, 2.2);
+      ctx.stroke();
     } else if (t === 'statue') {
       ctx.fillStyle = 'rgba(30, 26, 24, 0.24)';
       ctx.beginPath();
@@ -799,6 +854,16 @@ export class Renderer {
       ctx.font = '800 7px Arial, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('VALET', prop.x, prop.y - 2);
+    } else if (t === 'garageSign') {
+      ctx.fillStyle = '#2c2620';
+      ctx.fillRect(prop.x - 1, prop.y, 2, 24);
+      ctx.fillStyle = '#ffb45c';
+      roundRect(ctx, prop.x - 16, prop.y - 12, 32, 14, 2);
+      ctx.fill();
+      ctx.fillStyle = '#231b14';
+      ctx.font = '900 6px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('REPAIR', prop.x, prop.y - 3);
     } else if (t === 'newsbox') {
       ctx.fillStyle = 'rgba(30, 25, 20, 0.2)';
       ctx.fillRect(prop.x - 5, prop.y - 4, 12, 10);
@@ -899,8 +964,62 @@ export class Renderer {
     ctx.restore();
   }
 
+  bakeRamps(game) {
+    const ctx2 = this.ctx;
+    for (const ramp of game.city.ramps) {
+      ctx2.save();
+      ctx2.translate(ramp.x, ramp.y);
+      ctx2.rotate(ramp.angle);
+      // Shadow and slab.
+      ctx2.fillStyle = 'rgba(20, 18, 22, 0.3)';
+      roundRect(ctx2, -ramp.w / 2 + 6, -ramp.h / 2 + 7, ramp.w, ramp.h, 4);
+      ctx2.fill();
+      ctx2.fillStyle = '#5d5962';
+      roundRect(ctx2, -ramp.w / 2, -ramp.h / 2, ramp.w, ramp.h, 4);
+      ctx2.fill();
+      // Rising deck: brighter nose.
+      const grad = ctx2.createLinearGradient(-ramp.w / 2, 0, ramp.w / 2, 0);
+      grad.addColorStop(0, '#7a7580');
+      grad.addColorStop(0.6, '#918a92');
+      grad.addColorStop(1, '#c2b7ae');
+      ctx2.fillStyle = grad;
+      roundRect(ctx2, -ramp.w / 2 + 3, -ramp.h / 2 + 3, ramp.w - 6, ramp.h - 6, 3);
+      ctx2.fill();
+      // Warning stripes.
+      ctx2.save();
+      roundRect(ctx2, -ramp.w / 2 + 4, -ramp.h / 2 + 4, ramp.w - 8, ramp.h - 8, 2);
+      ctx2.clip();
+      for (let x = -ramp.w / 2; x < ramp.w / 2 + 20; x += 18) {
+        ctx2.fillStyle = 'rgba(255, 209, 102, 0.6)';
+        ctx2.beginPath();
+        ctx2.moveTo(x, -ramp.h / 2);
+        ctx2.lineTo(x + 8, -ramp.h / 2);
+        ctx2.lineTo(x + 8 - 14, ramp.h / 2);
+        ctx2.lineTo(x - 14, ramp.h / 2);
+        ctx2.closePath();
+        ctx2.fill();
+      }
+      ctx2.restore();
+      // Chevrons.
+      ctx2.fillStyle = 'rgba(255, 246, 220, 0.9)';
+      for (let i = 0; i < 2; i += 1) {
+        const cx = ramp.w * 0.12 + i * 12;
+        ctx2.beginPath();
+        ctx2.moveTo(cx - 5, -9);
+        ctx2.lineTo(cx + 4, 0);
+        ctx2.lineTo(cx - 5, 9);
+        ctx2.lineTo(cx - 1, 9);
+        ctx2.lineTo(cx + 8, 0);
+        ctx2.lineTo(cx - 1, -9);
+        ctx2.closePath();
+        ctx2.fill();
+      }
+      ctx2.restore();
+    }
+  }
+
   // =================================================================
-  // Buildings (static)
+  // Buildings
   // =================================================================
   bakeBuildings(game) {
     const ctx = this.ctx;
@@ -913,7 +1032,6 @@ export class Renderer {
       const ox = -lift * 0.5;
       const oy = -lift * 0.8;
 
-      // Contact shadow.
       ctx.fillStyle = 'rgba(24, 20, 20, 0.2)';
       roundRect(ctx, left + 7, top + 10, b.w, b.h, 3);
       ctx.fill();
@@ -921,7 +1039,6 @@ export class Renderer {
       roundRect(ctx, left + 14, top + 19, b.w, b.h, 4);
       ctx.fill();
 
-      // Walls.
       ctx.fillStyle = this.shade(b.color, -0.24);
       roundRect(ctx, left, top, b.w, b.h, 2.5);
       ctx.fill();
@@ -929,10 +1046,8 @@ export class Renderer {
       roundRect(ctx, left + ox * 0.35, top + oy * 0.35, b.w, b.h, 2.5);
       ctx.fill();
 
-      // Facade detail on the south and east walls.
       this.bakeFacade(ctx, game, b, left, top, detailed);
 
-      // Roof.
       const rx = left + ox;
       const ry = top + oy;
       ctx.fillStyle = b.roofColor || '#5b5248';
@@ -942,7 +1057,6 @@ export class Renderer {
       ctx.lineWidth = 1.2;
       ctx.stroke();
 
-      // Roof material marks.
       if (b.type === 'tower') {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.055)';
         for (let gy = ry + 8; gy < ry + b.h * 0.9; gy += 10) ctx.fillRect(rx + 6, gy, b.w * 0.9 - 12, 1);
@@ -962,14 +1076,12 @@ export class Renderer {
         ctx.strokeRect(rx + 4.5, ry + 4.5, b.w * 0.94 - 9, b.h * 0.94 - 9);
       }
 
-      // Rooftop props.
       if (detailed) this.bakeRoofProps(ctx, game, b, rx, ry);
 
-      // Rooftop pool.
       if (b.hasRoofPool || b.hasPool) {
-        ctx.fillStyle = '#3ba9bd';
         const poolX = b.hasRoofPool ? rx + b.w * 0.55 : left + b.w + 12;
         const poolY = b.hasRoofPool ? ry + b.h * 0.35 : top + b.h * 0.55;
+        ctx.fillStyle = '#3ba9bd';
         roundRect(ctx, poolX, poolY, 22, 13, 3);
         ctx.fill();
         ctx.strokeStyle = 'rgba(239, 251, 248, 0.55)';
@@ -977,7 +1089,6 @@ export class Renderer {
         ctx.stroke();
       }
 
-      // Helipad.
       if (b.hasHelipad) {
         const hx = rx + b.w * 0.5;
         const hy = ry + b.h * 0.5;
@@ -996,7 +1107,6 @@ export class Renderer {
         ctx.fillText('H', hx, hy + 4);
       }
 
-      // Shop awning over the south wall.
       if (detailed && b.awning) {
         const aw = Math.min(b.w * 0.8, 86);
         ctx.fillStyle = b.awningColor || '#c45a5a';
@@ -1007,10 +1117,8 @@ export class Renderer {
         ctx.fillRect(b.x - aw / 2, top + b.h + 6, aw, 4);
       }
 
-      // Neon sign on the street edge.
       if (b.neonText && detailed) this.bakeSign(ctx, b, left, top);
 
-      // Roller doors.
       if (b.rollerDoors) {
         for (let i = 0; i < b.rollerDoors; i += 1) {
           const dw = 18;
@@ -1028,7 +1136,6 @@ export class Renderer {
         }
       }
 
-      // Gardens around houses.
       if (b.garden) {
         ctx.strokeStyle = 'rgba(96, 130, 79, 0.5)';
         ctx.lineWidth = 3;
@@ -1060,7 +1167,6 @@ export class Renderer {
         ctx.fillRect(eastX - wallDepth + 0.5, wy, 2, 5);
       }
     }
-    // Shop glazing on low rises.
     if (b.type === 'lowrise' || b.type === 'landmark') {
       ctx.fillStyle = 'rgba(150, 214, 216, 0.42)';
       const glassW = (b.w - 24) / Math.max(1, b.shopWindows || 2);
@@ -1156,6 +1262,7 @@ export class Renderer {
       }
       ctx.restore();
     }
+    void game;
   }
 
   shade(hex, amount) {
@@ -1176,6 +1283,12 @@ export class Renderer {
     return `rgb(${r | 0}, ${g | 0}, ${b | 0})`;
   }
 
+  hexAlpha(hex, alpha) {
+    if (!hex || hex[0] !== '#' || hex.length < 7) return `rgba(255, 220, 160, ${alpha})`;
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+  }
+
   // =================================================================
   // Animated water and shore
   // =================================================================
@@ -1184,14 +1297,14 @@ export class Renderer {
     if (v.x2 < 2660) return;
     const ctx = this.ctx;
     const time = game.worldTime || 0;
+    const storm = game.weather?.type === 'storm' ? 1.5 : game.weather?.type === 'rain' ? 1.15 : 1;
     ctx.save();
     ctx.beginPath();
     ctx.rect(2712, Math.max(0, v.y - 20), 488, Math.min(3200, v.y2 - v.y + 40));
     ctx.clip();
 
-    // Long swell lines.
-    ctx.strokeStyle = 'rgba(206, 246, 244, 0.18)';
-    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = `rgba(206, 246, 244, ${0.13 + 0.05 * storm})`;
+    ctx.lineWidth = 1.4 * storm;
     const yStart = Math.max(0, Math.floor(v.y / 52) * 52 - 52);
     const yEnd = Math.min(3200, v.y2 + 52);
     for (let y = yStart; y < yEnd; y += 52) {
@@ -1206,13 +1319,23 @@ export class Renderer {
       ctx.stroke();
     }
 
-    // Sparkle glints.
-    for (let i = 0; i < 28; i += 1) {
+    for (let i = 0; i < 30; i += 1) {
       const x = 2740 + ((i * 173 + time * 22) % 450);
       const y = (i * 271 + time * 9) % 3200;
-      const a = 0.1 + 0.16 * (0.5 + 0.5 * Math.sin(time * 2 + i));
+      const a = 0.08 + 0.18 * (0.5 + 0.5 * Math.sin(time * 2 + i));
       ctx.fillStyle = `rgba(230, 252, 248, ${a})`;
       ctx.fillRect(x, y, 4, 1.4);
+    }
+
+    // Marina wake lines.
+    ctx.strokeStyle = 'rgba(190, 240, 238, 0.16)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 5; i += 1) {
+      const y = 2050 + i * 62 + Math.sin(time * 0.9 + i) * 8;
+      ctx.beginPath();
+      ctx.moveTo(2740, y);
+      ctx.quadraticCurveTo(2830, y + 12, 2920, y - 4);
+      ctx.stroke();
     }
     ctx.restore();
   }
@@ -1223,46 +1346,77 @@ export class Renderer {
     const ctx = this.ctx;
     const time = game.worldTime || 0;
     const x = 2712 + Math.sin(time * 1.3) * 2.5;
-    ctx.strokeStyle = 'rgba(246, 255, 252, 0.76)';
+    ctx.strokeStyle = 'rgba(246, 255, 252, 0.74)';
     ctx.lineWidth = 5;
     ctx.beginPath();
-    for (let y = Math.max(0, Math.floor(v.y / 16) * 16); y <= Math.min(3200, v.y2 + 16); y += 16) {
+    const start = Math.max(0, Math.floor(v.y / 16) * 16);
+    for (let y = start; y <= Math.min(3200, v.y2 + 16); y += 16) {
       const wx = x + Math.sin(y * 0.03 + time * 1.9) * 4 + Math.sin(y * 0.09 + time * 2.7) * 1.4;
-      if (y === Math.max(0, Math.floor(v.y / 16) * 16)) ctx.moveTo(wx, y);
+      if (y === start) ctx.moveTo(wx, y);
       else ctx.lineTo(wx, y);
     }
     ctx.stroke();
     ctx.strokeStyle = 'rgba(200, 244, 242, 0.32)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    for (let y = Math.max(0, Math.floor(v.y / 20) * 20); y <= Math.min(3200, v.y2 + 20); y += 20) {
+    const start2 = Math.max(0, Math.floor(v.y / 20) * 20);
+    for (let y = start2; y <= Math.min(3200, v.y2 + 20); y += 20) {
       const wx = x + 12 + Math.sin(y * 0.024 + time * 1.4 + 1) * 7;
-      if (y === Math.max(0, Math.floor(v.y / 20) * 20)) ctx.moveTo(wx, y);
+      if (y === start2) ctx.moveTo(wx, y);
       else ctx.lineTo(wx, y);
     }
     ctx.stroke();
   }
 
   // =================================================================
-  // Road life: traffic lights, skid marks, scuffs
+  // Road life
   // =================================================================
   drawRoadLife(game) {
     const ctx = this.ctx;
-    // Skid marks fade realistically and sit over the asphalt.
     for (const s of game.city.skidMarks) {
       if (!this.inView(s.x, s.y, 18)) continue;
-      const fade = clamp(1 - s.age / 22, 0, 1);
+      const fade = clamp(1 - s.age / 24, 0, 1);
       ctx.save();
       ctx.translate(s.x, s.y);
       ctx.rotate(s.angle);
-      ctx.fillStyle = `rgba(20, 18, 22, ${s.alpha * fade * 0.5})`;
+      ctx.fillStyle = `rgba(20, 18, 22, ${s.alpha * fade * 0.52})`;
       roundRect(ctx, -7, -1.8, 14, 3.6, 1.4);
       ctx.fill();
       ctx.restore();
     }
 
-    // Traffic lights.
-    const dark = this.lightLevel(game);
+    // Puddles are always visible as damp patches; rain fills them.
+    const wet = game.weather?.wetness ?? 0;
+    for (const p of game.city.puddles) {
+      if (!this.inView(p.x, p.y, 70)) continue;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.angle);
+      const grad = ctx.createLinearGradient(-p.rx, 0, p.rx, 0);
+      grad.addColorStop(0, `rgba(76, 122, 140, ${0.08 + wet * 0.18})`);
+      grad.addColorStop(0.5, `rgba(186, 224, 232, ${0.12 + wet * 0.24})`);
+      grad.addColorStop(1, `rgba(74, 108, 126, ${0.08 + wet * 0.16})`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, p.rx * (0.85 + wet * 0.35), p.ry * (0.9 + wet * 0.25), 0, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(220, 245, 248, ${p.alpha * (0.4 + wet * 0.5)})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      if (wet > 0.08) {
+        const neon = districtAt(p.x, p.y).neon;
+        ctx.strokeStyle = neon;
+        ctx.globalAlpha = Math.min(0.4, wet * 0.4);
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(-p.rx * 0.6, -1);
+        ctx.lineTo(p.rx * 0.6, 1);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    const dark = this.lightInfo(game).dark;
     for (const light of game.city.trafficLights) {
       if (!this.inView(light.x, light.y, 20)) continue;
       const red = light.state === 'red';
@@ -1290,91 +1444,209 @@ export class Renderer {
     }
   }
 
-  drawScuffs(game) {
+  drawRampsLive(game) {
     const ctx = this.ctx;
-    for (const s of game.particles.scuffs) {
-      if (!this.inView(s.x, s.y, 10)) continue;
+    const time = game.worldTime || 0;
+    for (const ramp of game.city.ramps) {
+      if (!this.inView(ramp.x, ramp.y, 70)) continue;
+      const pulse = 0.5 + 0.5 * Math.sin(time * 3 + ramp.x);
       ctx.save();
-      ctx.translate(s.x, s.y);
-      ctx.rotate(s.angle);
-      ctx.fillStyle = `rgba(76, 68, 58, ${s.life * 0.18})`;
-      ctx.fillRect(-4, -1, 8, 2);
+      ctx.translate(ramp.x, ramp.y);
+      ctx.rotate(ramp.angle);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(255, 209, 102, ${0.05 + pulse * 0.07})`;
+      roundRect(ctx, -ramp.w / 2, -ramp.h / 2, ramp.w, ramp.h, 4);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(255, 226, 165, ${0.25 + pulse * 0.4})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
       ctx.restore();
     }
   }
 
   // =================================================================
-  // Palms: drawn live so the fronds move with the sea wind.
+  // Wet reflections
   // =================================================================
-  drawPalms(game) {
+  drawWetReflections(game) {
+    const wet = game.weather?.wetness ?? 0;
+    if (wet < 0.05) return;
     const ctx = this.ctx;
-    const time = game.worldTime || 0;
-    const wind = 0.5 + (game.weather?.wind || 0.3) * 0.8;
-    for (const palm of game.city.palmTrees) {
-      if (!this.inView(palm.x, palm.y, palm.size * 2 + 30)) continue;
-      const size = palm.size;
-      const sway = Math.sin(time * (0.7 + wind * 0.55) + palm.x * 0.013 + palm.y * 0.009) * (0.12 + wind * 0.08);
-      const sway2 = Math.sin(time * 1.35 + palm.y * 0.017) * 0.05;
-      // Shadow.
-      const sg = ctx.createRadialGradient(palm.x + 5, palm.y + 4, 2, palm.x + 7, palm.y + 6, size * 0.9);
-      sg.addColorStop(0, 'rgba(18, 24, 14, 0.26)');
-      sg.addColorStop(1, 'rgba(18, 24, 14, 0)');
-      ctx.fillStyle = sg;
-      ctx.beginPath();
-      ctx.ellipse(palm.x + 7, palm.y + 6, size * 0.85, size * 0.5, 0.2, 0, TAU);
-      ctx.fill();
-      // Trunk.
-      ctx.strokeStyle = '#7d6748';
-      ctx.lineWidth = Math.max(2.5, size * 0.11);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(palm.x, palm.y + size * 0.1);
-      ctx.quadraticCurveTo(palm.x + sway * size * 0.25, palm.y - size * 0.05, palm.x + sway * size * 0.55, palm.y - size * 0.12);
-      ctx.stroke();
-      // Fronds.
-      const topX = palm.x + sway * size * 0.55;
-      const topY = palm.y - size * 0.12;
-      for (let i = 0; i < 7; i += 1) {
-        const a = (i / 7) * TAU + sway + sway2;
-        const len = size * (0.72 + (i % 3) * 0.09);
-        const bend = 0.3 + Math.sin(time * 1.2 + i) * 0.05;
-        ctx.strokeStyle = i % 2 === 0 ? '#4c7b45' : '#5f8f52';
-        ctx.lineWidth = Math.max(1.3, size * 0.075);
-        ctx.beginPath();
-        ctx.moveTo(topX, topY);
-        ctx.quadraticCurveTo(
-          topX + Math.cos(a) * len * 0.55,
-          topY + Math.sin(a) * len * 0.55 - len * 0.14,
-          topX + Math.cos(a + bend * 0.16) * len,
-          topY + Math.sin(a + bend * 0.16) * len * 0.72,
-        );
-        ctx.stroke();
-        // Leaflets.
-        ctx.strokeStyle = 'rgba(97, 140, 78, 0.55)';
-        ctx.lineWidth = 0.9;
-        for (let j = 1; j <= 3; j += 1) {
-          const t = j / 4;
-          const lx = topX + Math.cos(a) * len * t * 0.85;
-          const ly = topY + Math.sin(a) * len * t * 0.65 - len * 0.1 * t;
-          ctx.beginPath();
-          ctx.moveTo(lx, ly);
-          ctx.lineTo(lx + Math.cos(a + 0.65) * len * 0.16, ly + Math.sin(a + 0.65) * len * 0.1);
-          ctx.moveTo(lx, ly);
-          ctx.lineTo(lx + Math.cos(a - 0.65) * len * 0.16, ly + Math.sin(a - 0.65) * len * 0.1);
-          ctx.stroke();
-        }
-      }
-      ctx.fillStyle = '#6a5538';
-      ctx.beginPath();
-      ctx.arc(topX, topY, Math.max(1.4, size * 0.055), 0, TAU);
-      ctx.fill();
+    const v = this.view;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // Long neon smears on the asphalt where signs face the road.
+    for (const b of game.city.buildings) {
+      if (!b.neonText || !this.inView(b.x, b.y, 90)) continue;
+      const y = b.y + b.h / 2;
+      const g = ctx.createLinearGradient(b.x, y, b.x, y + 90 * wet);
+      g.addColorStop(0, this.hexAlpha(b.neonColor, 0.12 * wet));
+      g.addColorStop(0.4, this.hexAlpha(b.neonColor, 0.05 * wet));
+      g.addColorStop(1, this.hexAlpha(b.neonColor, 0));
+      ctx.fillStyle = g;
+      ctx.fillRect(b.x - 16, y, 32, 90 * wet);
     }
-    ctx.lineCap = 'butt';
+
+    // Mirrored tail/head lights under moving cars.
+    for (const car of this.visibleVehicles(game)) {
+      if (car.isDestroyed) continue;
+      const fx = Math.cos(car.angle);
+      const fy = Math.sin(car.angle);
+      const nx = -fy;
+      const ny = fx;
+      const speed = Math.hypot(car.vx, car.vy);
+      const alpha = clamp(0.05 + wet * 0.12, 0, 0.18) * clamp(speed / 160, 0.4, 1);
+      const streak = 24 + wet * 50;
+      for (const side of [-1, 1]) {
+        const lx = car.x - fx * car.length * 0.46 + nx * car.width * 0.28 * side;
+        const ly = car.y - fy * car.length * 0.46 + ny * car.width * 0.28 * side;
+        const g = ctx.createLinearGradient(lx, ly, lx + fx * streak, ly + fy * streak);
+        g.addColorStop(0, `rgba(255, 70, 80, ${alpha})`);
+        g.addColorStop(1, 'rgba(255, 70, 80, 0)');
+        ctx.strokeStyle = g;
+        ctx.lineWidth = 4 + wet * 4;
+        ctx.beginPath();
+        ctx.moveTo(lx, ly);
+        ctx.lineTo(lx + fx * streak, ly + fy * streak);
+        ctx.stroke();
+      }
+      const hx = car.x + fx * car.length * 0.46;
+      const hy = car.y + fy * car.length * 0.46;
+      const hg = ctx.createLinearGradient(hx, hy, hx + fx * (streak * 0.7), hy + fy * (streak * 0.7));
+      hg.addColorStop(0, `rgba(255, 244, 210, ${alpha * 0.7})`);
+      hg.addColorStop(1, 'rgba(255, 244, 210, 0)');
+      ctx.strokeStyle = hg;
+      ctx.lineWidth = 6 + wet * 4;
+      ctx.beginPath();
+      ctx.moveTo(hx, hy);
+      ctx.lineTo(hx + fx * streak * 0.7, hy + fy * streak * 0.7);
+      ctx.stroke();
+    }
+
+    // A soft sheen over every road in view.
+    ctx.fillStyle = `rgba(120, 184, 202, ${0.018 + wet * 0.022})`;
+    for (const road of game.city.roads) {
+      if (road.horizontal) {
+        if (road.y1 < v.y - 80 || road.y1 > v.y2 + 80) continue;
+        ctx.fillRect(Math.max(v.x, road.x1), road.y1 - road.half * 0.7, Math.min(v.x2, road.x2) - Math.max(v.x, road.x1), road.half * 1.4);
+      } else {
+        if (road.x1 < v.x - 80 || road.x1 > v.x2 + 80) continue;
+        ctx.fillRect(road.x1 - road.half * 0.7, Math.max(v.y, road.y1), road.half * 1.4, Math.min(v.y2, road.y2) - Math.max(v.y, road.y1));
+      }
+    }
+    ctx.restore();
+  }
+
+  visibleVehicles(game) {
+    const out = [];
+    for (const list of [game.traffic?.vehicles, game.traffic?.parked, game.police?.cops, game.police?.roadblocks]) {
+      if (!list) continue;
+      for (const v of list) if (this.inView(v.x, v.y, 100)) out.push(v);
+    }
+    return out;
   }
 
   // =================================================================
-  // Police search cones
+  // Lighting
   // =================================================================
+  drawGroundLighting(game) {
+    const li = this.lightInfo(game);
+    const dark = li.dark;
+    if (dark < 0.04) return;
+    const ctx = this.ctx;
+    const wet = game.weather?.wetness || 0;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    for (const light of game.city.streetlights) {
+      if (!this.inView(light.x, light.y, light.radius)) continue;
+      const r = light.radius * (0.56 + wet * 0.1);
+      const g = ctx.createRadialGradient(light.x, light.y, 1, light.x, light.y, r);
+      g.addColorStop(0, `rgba(255, 226, 170, ${0.1 * dark})`);
+      g.addColorStop(0.28, `rgba(255, 216, 154, ${0.066 * dark})`);
+      g.addColorStop(0.55, `rgba(255, 200, 134, ${0.03 * dark})`);
+      g.addColorStop(0.8, `rgba(255, 186, 112, ${0.01 * dark})`);
+      g.addColorStop(1, 'rgba(255, 180, 100, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(light.x, light.y, r, 0, TAU);
+      ctx.fill();
+    }
+
+    for (const b of game.city.buildings) {
+      if (!b.neonText || !this.inView(b.x, b.y, 84)) continue;
+      const r = 56;
+      const g = ctx.createRadialGradient(b.x, b.y, 2, b.x, b.y, r);
+      g.addColorStop(0, this.hexAlpha(b.neonColor, 0.13 * dark));
+      g.addColorStop(0.34, this.hexAlpha(b.neonColor, 0.072 * dark));
+      g.addColorStop(0.68, this.hexAlpha(b.neonColor, 0.02 * dark));
+      g.addColorStop(1, this.hexAlpha(b.neonColor, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, r, 0, TAU);
+      ctx.fill();
+    }
+
+    for (const v of this.visibleVehicles(game)) {
+      if (!v.headlightsOn || v.isDestroyed || v.aiMode === 'parked') continue;
+      const driven = v === game.player.vehicle || v.driver || Math.hypot(v.vx || 0, v.vy || 0) > 24;
+      if (!driven) continue;
+      const fx = Math.cos(v.angle);
+      const fy = Math.sin(v.angle);
+      const noseX = v.x + fx * v.length * 0.5;
+      const noseY = v.y + fy * v.length * 0.5;
+      const len = 128 + wet * 16;
+      ctx.save();
+      ctx.translate(noseX, noseY);
+      ctx.rotate(v.angle);
+      const cone = ctx.createLinearGradient(0, 0, len, 0);
+      cone.addColorStop(0, `rgba(255, 242, 212, ${0.085 * dark})`);
+      cone.addColorStop(0.16, `rgba(255, 236, 196, ${0.058 * dark})`);
+      cone.addColorStop(0.52, `rgba(255, 226, 178, ${0.024 * dark})`);
+      cone.addColorStop(0.82, `rgba(255, 220, 168, ${0.007 * dark})`);
+      cone.addColorStop(1, 'rgba(255, 218, 160, 0)');
+      ctx.fillStyle = cone;
+      ctx.beginPath();
+      ctx.moveTo(0, -v.width * 0.3);
+      ctx.lineTo(len, -v.width * 0.5);
+      ctx.lineTo(len, v.width * 0.5);
+      ctx.lineTo(0, v.width * 0.3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    for (const cop of game.police?.cops || []) {
+      if (!cop.sirenActive || cop.isDestroyed || !this.inView(cop.x, cop.y, 90)) continue;
+      const fx = Math.cos(cop.angle);
+      const fy = Math.sin(cop.angle);
+      const rx = -fy;
+      const ry = fx;
+      const lampX = cop.x + fx * cop.length * 0.16;
+      const lampY = cop.y + fy * cop.length * 0.16;
+      const redA = cop.sirenPhase ? 0.11 : 0.035;
+      const blueA = cop.sirenPhase ? 0.035 : 0.11;
+      for (const [off, rgb, a] of [
+        [-cop.width * 0.22, '255, 72, 92', redA],
+        [cop.width * 0.22, '92, 166, 255', blueA],
+      ]) {
+        const gx = lampX + rx * off;
+        const gy = lampY + ry * off;
+        const radius = 28;
+        const g = ctx.createRadialGradient(gx, gy, 1, gx, gy, radius);
+        g.addColorStop(0, `rgba(${rgb}, ${a * dark})`);
+        g.addColorStop(0.45, `rgba(${rgb}, ${a * 0.5 * dark})`);
+        g.addColorStop(0.75, `rgba(${rgb}, ${a * 0.14 * dark})`);
+        g.addColorStop(1, `rgba(${rgb}, 0)`);
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(gx, gy, radius, 0, TAU);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
   drawSearchCones(game) {
     const police = game.police;
     if (!police || police.wantedStars <= 0) return;
@@ -1383,8 +1655,8 @@ export class Renderer {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     const units = [
-      ...(police.cops || []).map((c) => ({ x: c.x, y: c.y, angle: c.angle, radius: 205, foot: false })),
-      ...(police.footCops || []).filter((f) => !f.isDead).map((f) => ({ x: f.x, y: f.y, angle: f.angle, radius: 145, foot: true })),
+      ...(police.cops || []).map((c) => ({ x: c.x, y: c.y, angle: c.angle, radius: 205 })),
+      ...(police.footCops || []).filter((f) => !f.isDead).map((f) => ({ x: f.x, y: f.y, angle: f.angle, radius: 145 })),
     ];
     for (const u of units) {
       if (!this.inView(u.x, u.y, u.radius + 40)) continue;
@@ -1408,234 +1680,70 @@ export class Renderer {
   }
 
   // =================================================================
-  // Wet roads
+  // Palms
   // =================================================================
-  drawWetRoads(game) {
-    const wet = game.weather?.wetness ?? 0;
-    if (wet < 0.03) return;
+  drawPalms(game) {
     const ctx = this.ctx;
-    const v = this.view;
-    ctx.save();
-    ctx.globalAlpha = Math.min(0.72, wet);
-    for (const p of game.city.puddles) {
-      if (!this.inView(p.x, p.y, 70)) continue;
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(p.angle);
-      const grad = ctx.createLinearGradient(-p.rx, 0, p.rx, 0);
-      grad.addColorStop(0, 'rgba(96, 140, 158, 0.16)');
-      grad.addColorStop(0.5, 'rgba(190, 225, 232, 0.3)');
-      grad.addColorStop(1, 'rgba(90, 120, 140, 0.12)');
-      ctx.fillStyle = grad;
+    const time = game.worldTime || 0;
+    const wind = 0.5 + (game.weather?.wind || 0.3) * 0.9;
+    for (const palm of game.city.palmTrees) {
+      if (!this.inView(palm.x, palm.y, palm.size * 2 + 30)) continue;
+      const size = palm.size;
+      const sway = Math.sin(time * (0.7 + wind * 0.55) + palm.x * 0.013 + palm.y * 0.009) * (0.12 + wind * 0.09);
+      const sway2 = Math.sin(time * 1.35 + palm.y * 0.017) * 0.05;
+      const li = this.lightInfo(game);
+      const shadowOff = li.daylight > 0.1 ? li.shadowLen * 8 : 3;
+      const sg = ctx.createRadialGradient(palm.x + shadowOff, palm.y + shadowOff * 0.6, 2, palm.x + shadowOff, palm.y + shadowOff * 0.6, size * 0.9);
+      sg.addColorStop(0, 'rgba(18, 24, 14, 0.26)');
+      sg.addColorStop(1, 'rgba(18, 24, 14, 0)');
+      ctx.fillStyle = sg;
       ctx.beginPath();
-      ctx.ellipse(0, 0, p.rx * (0.8 + wet * 0.4), p.ry, 0, 0, TAU);
+      ctx.ellipse(palm.x + shadowOff, palm.y + shadowOff * 0.6, size * 0.85, size * 0.5, 0.2, 0, TAU);
       ctx.fill();
-      ctx.strokeStyle = `rgba(220, 245, 248, ${p.alpha * 0.6})`;
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#7d6748';
+      ctx.lineWidth = Math.max(2.5, size * 0.11);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(palm.x, palm.y + size * 0.1);
+      ctx.quadraticCurveTo(palm.x + sway * size * 0.25, palm.y - size * 0.05, palm.x + sway * size * 0.55, palm.y - size * 0.12);
       ctx.stroke();
-      // Neon smear across the puddle.
-      const neon = districtAt(p.x, p.y).neon;
-      ctx.strokeStyle = neon;
-      ctx.globalAlpha = Math.min(0.35, wet * 0.35);
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.moveTo(-p.rx * 0.6, -1);
-      ctx.lineTo(p.rx * 0.6, 1);
-      ctx.stroke();
-      ctx.globalAlpha = Math.min(0.72, wet);
-      ctx.restore();
-    }
-
-    // Wet sheen along the roads in view.
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = `rgba(116, 180, 200, ${0.022 * wet})`;
-    for (const road of game.city.roads) {
-      if (road.horizontal) {
-        if (road.y1 < v.y - 80 || road.y1 > v.y2 + 80) continue;
-      } else if (road.x1 < v.x - 80 || road.x1 > v.x2 + 80) continue;
-      if (road.horizontal) {
-        ctx.fillRect(Math.max(v.x, road.x1), road.y1 - road.half * 0.6, Math.min(v.x2, road.x2) - Math.max(v.x, road.x1), road.half * 1.2);
-      } else {
-        ctx.fillRect(road.x1 - road.half * 0.6, Math.max(v.y, road.y1), road.half * 1.2, Math.min(v.y2, road.y2) - Math.max(v.y, road.y1));
-      }
-    }
-    ctx.restore();
-  }
-
-  // =================================================================
-  // Lighting
-  // =================================================================
-  drawGroundLighting(game) {
-    const dark = this.lightLevel(game);
-    if (dark < 0.04) return;
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-
-    // Street lamps: tight, heavily feathered pools. The falloff uses several
-    // stops so the rim disappears into the pavement instead of reading as a
-    // translucent disc. Radii stay well under a car length.
-    for (const light of game.city.streetlights) {
-      if (!this.inView(light.x, light.y, light.radius)) continue;
-      const r = light.radius * 0.58;
-      const g = ctx.createRadialGradient(light.x, light.y, 1, light.x, light.y, r);
-      g.addColorStop(0, `rgba(255, 226, 170, ${0.1 * dark})`);
-      g.addColorStop(0.28, `rgba(255, 216, 154, ${0.068 * dark})`);
-      g.addColorStop(0.55, `rgba(255, 200, 134, ${0.032 * dark})`);
-      g.addColorStop(0.8, `rgba(255, 186, 112, ${0.011 * dark})`);
-      g.addColorStop(1, 'rgba(255, 180, 100, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(light.x, light.y, r, 0, TAU);
-      ctx.fill();
-    }
-
-    // Neon shopfront pools: a soft spill on the nearest paving, not a halo
-    // that covers the road and traffic.
-    for (const b of game.city.buildings) {
-      if (!b.neonText || !this.inView(b.x, b.y, 80)) continue;
-      const r = 52;
-      const g = ctx.createRadialGradient(b.x, b.y, 2, b.x, b.y, r);
-      g.addColorStop(0, this.hexAlpha(b.neonColor, 0.13 * dark));
-      g.addColorStop(0.34, this.hexAlpha(b.neonColor, 0.075 * dark));
-      g.addColorStop(0.68, this.hexAlpha(b.neonColor, 0.025 * dark));
-      g.addColorStop(1, this.hexAlpha(b.neonColor, 0));
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, r, 0, TAU);
-      ctx.fill();
-    }
-
-    // Headlight cones: low-alpha, narrow and crisp. Parked cars keep their
-    // lights off, so a bay full of cars no longer washes the street pale.
-    for (const v of this.visibleVehicles(game)) {
-      if (!v.headlightsOn || v.isDestroyed || v.aiMode === 'parked') continue;
-      const driven = v === game.player.vehicle || v.driver || Math.hypot(v.vx || 0, v.vy || 0) > 24;
-      if (!driven) continue;
-      const fx = Math.cos(v.angle);
-      const fy = Math.sin(v.angle);
-      const noseX = v.x + fx * v.length * 0.5;
-      const noseY = v.y + fy * v.length * 0.5;
-      const len = 118;
-      ctx.save();
-      ctx.translate(noseX, noseY);
-      ctx.rotate(v.angle);
-      const cone = ctx.createLinearGradient(0, 0, len, 0);
-      cone.addColorStop(0, `rgba(255, 242, 212, ${0.085 * dark})`);
-      cone.addColorStop(0.16, `rgba(255, 236, 196, ${0.06 * dark})`);
-      cone.addColorStop(0.52, `rgba(255, 226, 178, ${0.025 * dark})`);
-      cone.addColorStop(0.82, `rgba(255, 220, 168, ${0.008 * dark})`);
-      cone.addColorStop(1, 'rgba(255, 218, 160, 0)');
-      ctx.fillStyle = cone;
-      ctx.beginPath();
-      ctx.moveTo(0, -v.width * 0.3);
-      ctx.lineTo(len, -v.width * 0.5);
-      ctx.lineTo(len, v.width * 0.5);
-      ctx.lineTo(0, v.width * 0.3);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
-
-    // Sirens: two small red/blue washes on the asphalt under the light bar,
-    // never a single broad disc over the roof.
-    for (const cop of game.police?.cops || []) {
-      if (!cop.sirenActive || cop.isDestroyed || !this.inView(cop.x, cop.y, 90)) continue;
-      const fx = Math.cos(cop.angle);
-      const fy = Math.sin(cop.angle);
-      const rx = -fy;
-      const ry = fx;
-      const lampX = cop.x + fx * cop.length * 0.16;
-      const lampY = cop.y + fy * cop.length * 0.16;
-      const redA = cop.sirenPhase ? 0.11 : 0.035;
-      const blueA = cop.sirenPhase ? 0.035 : 0.11;
-      for (const [off, rgb, a] of [
-        [-cop.width * 0.22, '255, 72, 92', redA],
-        [cop.width * 0.22, '92, 166, 255', blueA],
-      ]) {
-        const gx = lampX + rx * off;
-        const gy = lampY + ry * off;
-        const radius = 27;
-        const g = ctx.createRadialGradient(gx, gy, 1, gx, gy, radius);
-        g.addColorStop(0, `rgba(${rgb}, ${a * dark})`);
-        g.addColorStop(0.45, `rgba(${rgb}, ${a * 0.5 * dark})`);
-        g.addColorStop(0.75, `rgba(${rgb}, ${a * 0.14 * dark})`);
-        g.addColorStop(1, `rgba(${rgb}, 0)`);
-        ctx.fillStyle = g;
+      const topX = palm.x + sway * size * 0.55;
+      const topY = palm.y - size * 0.12;
+      for (let i = 0; i < 7; i += 1) {
+        const a = (i / 7) * TAU + sway + sway2;
+        const len = size * (0.72 + (i % 3) * 0.09);
+        const bend = 0.3 + Math.sin(time * 1.2 + i) * 0.05;
+        ctx.strokeStyle = i % 2 === 0 ? '#4c7b45' : '#5f8f52';
+        ctx.lineWidth = Math.max(1.3, size * 0.075);
         ctx.beginPath();
-        ctx.arc(gx, gy, radius, 0, TAU);
-        ctx.fill();
+        ctx.moveTo(topX, topY);
+        ctx.quadraticCurveTo(
+          topX + Math.cos(a) * len * 0.55,
+          topY + Math.sin(a) * len * 0.55 - len * 0.14,
+          topX + Math.cos(a + bend * 0.16) * len,
+          topY + Math.sin(a + bend * 0.16) * len * 0.72,
+        );
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(97, 140, 78, 0.55)';
+        ctx.lineWidth = 0.9;
+        for (let j = 1; j <= 3; j += 1) {
+          const t = j / 4;
+          const lx = topX + Math.cos(a) * len * t * 0.85;
+          const ly = topY + Math.sin(a) * len * t * 0.65 - len * 0.1 * t;
+          ctx.beginPath();
+          ctx.moveTo(lx, ly);
+          ctx.lineTo(lx + Math.cos(a + 0.65) * len * 0.16, ly + Math.sin(a + 0.65) * len * 0.1);
+          ctx.moveTo(lx, ly);
+          ctx.lineTo(lx + Math.cos(a - 0.65) * len * 0.16, ly + Math.sin(a - 0.65) * len * 0.1);
+          ctx.stroke();
+        }
       }
+      ctx.fillStyle = '#6a5538';
+      ctx.beginPath();
+      ctx.arc(topX, topY, Math.max(1.4, size * 0.055), 0, TAU);
+      ctx.fill();
     }
-    ctx.restore();
-  }
-
-  visibleVehicles(game) {
-    const out = [];
-    for (const list of [game.traffic?.vehicles, game.traffic?.parked, game.police?.cops, game.police?.roadblocks]) {
-      if (!list) continue;
-      for (const v of list) if (this.inView(v.x, v.y, 90)) out.push(v);
-    }
-    return out;
-  }
-
-  drawNeon(game) {
-    const dark = this.lightLevel(game);
-    if (dark < 0.05) return;
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    for (const b of game.city.buildings) {
-      if (!b.neonText || !this.inView(b.x, b.y, 80)) continue;
-      const x = b.x;
-      const y = b.y - b.h / 2 + b.h - 15;
-      const g = ctx.createRadialGradient(x, y, 1, x, y, 24);
-      g.addColorStop(0, this.hexAlpha(b.neonColor, 0.26 * dark));
-      g.addColorStop(0.45, this.hexAlpha(b.neonColor, 0.09 * dark));
-      g.addColorStop(0.78, this.hexAlpha(b.neonColor, 0.025 * dark));
-      g.addColorStop(1, this.hexAlpha(b.neonColor, 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(x - 26, y - 26, 52, 52);
-    }
-    for (const light of game.city.streetlights) {
-      if (!this.inView(light.x, light.y, 20)) continue;
-      const g = ctx.createRadialGradient(light.x, light.y, 0, light.x, light.y, 8);
-      g.addColorStop(0, `rgba(255, 238, 196, ${0.62 * dark})`);
-      g.addColorStop(1, 'rgba(255, 220, 160, 0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(light.x - 10, light.y - 10, 20, 20);
-    }
-    // Siren bloom: just the light bar, the ground wash lives in the lighting
-    // pass so it stays under the cars.
-    for (const cop of game.police?.cops || []) {
-      if (!cop.sirenActive || !this.inView(cop.x, cop.y, 40)) continue;
-      const fx = Math.cos(cop.angle);
-      const fy = Math.sin(cop.angle);
-      const rx = -fy;
-      const ry = fx;
-      const lampX = cop.x + fx * cop.length * 0.16;
-      const lampY = cop.y + fy * cop.length * 0.16;
-      for (const [off, rgb] of [
-        [-cop.width * 0.22, cop.sirenPhase ? '255, 72, 92' : '90, 54, 62'],
-        [cop.width * 0.22, cop.sirenPhase ? '54, 68, 96' : '92, 166, 255'],
-      ]) {
-        const gx = lampX + rx * off;
-        const gy = lampY + ry * off;
-        const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, 12);
-        g.addColorStop(0, `rgba(${rgb}, ${0.24 * dark})`);
-        g.addColorStop(0.5, `rgba(${rgb}, ${0.08 * dark})`);
-        g.addColorStop(1, `rgba(${rgb}, 0)`);
-        ctx.fillStyle = g;
-        ctx.fillRect(gx - 13, gy - 13, 26, 26);
-      }
-    }
-    ctx.restore();
-  }
-
-  hexAlpha(hex, alpha) {
-    if (!hex || hex[0] !== '#' || hex.length < 7) return `rgba(255, 220, 160, ${alpha})`;
-    const n = parseInt(hex.slice(1), 16);
-    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+    ctx.lineCap = 'butt';
   }
 
   // =================================================================
@@ -1662,14 +1770,16 @@ export class Renderer {
   drawShadows(game) {
     const actors = this.actorList(game);
     const ctx = this.ctx;
-    const dark = this.lightLevel(game);
+    const li = this.lightInfo(game);
+    const alpha = 0.26 + li.dark * 0.16;
     for (const actor of actors) {
       const r = actor.ref;
       if (actor.kind === 'vehicle') {
-        this.softShadow(ctx, r.x + 5, r.y + 7, Math.max(r.width, r.length) * 0.64, 0.32 + dark * 0.18, r.angle);
-      } else if (actor.kind === 'ped' || actor.kind === 'cop' || actor.kind === 'enemy' || actor.kind === 'player') {
-        if (r.isDead) this.softShadow(ctx, r.x + 4, r.y + 4, 16, 0.28, 0);
-        else this.softShadow(ctx, r.x + 3, r.y + 4, 12, 0.3, 0);
+        this.softShadow(ctx, r.x + 5, r.y + 7, Math.max(r.width, r.length) * 0.64, alpha, r.angle);
+      } else if (r.isDead) {
+        this.softShadow(ctx, r.x + 4, r.y + 4, 16, 0.28, 0);
+      } else {
+        this.softShadow(ctx, r.x + 3, r.y + 4, 12, 0.3, 0);
       }
     }
   }
@@ -1700,6 +1810,9 @@ export class Renderer {
     }
   }
 
+  // =================================================================
+  // Cars: per-type silhouettes and damage
+  // =================================================================
   drawVehicle(game, v) {
     const ctx = this.ctx;
     const cfg = v.config;
@@ -1707,39 +1820,44 @@ export class Renderer {
     const L = v.length;
     const W = v.width;
     const destroyed = v.isDestroyed;
+    const stage = v.damageStage;
+    const lift = v.airHeight || 0;
     ctx.save();
-    ctx.translate(v.x, v.y);
+    ctx.translate(v.x, v.y - lift);
     ctx.rotate(v.angle);
 
-    // Wheels.
+    // Wheels (missing on wrecks and damaged bikes).
     const axle = L * 0.29;
     const track = W * 0.44;
-    if (art.body === 'bike') {
-      ctx.fillStyle = '#17171a';
-      ctx.save();
-      ctx.translate(axle * 1.1, 0);
-      ctx.rotate(Math.PI / 2);
-      roundRect(ctx, -2.6, -4, 5.2, 8, 2.4);
-      ctx.fill();
-      ctx.restore();
-      ctx.save();
-      ctx.translate(-axle * 1.1, 0);
-      ctx.rotate(Math.PI / 2);
-      roundRect(ctx, -3.2, -5, 6.4, 10, 3);
-      ctx.fill();
-      ctx.restore();
-    } else {
-      ctx.fillStyle = '#17171a';
-      for (const wx of [axle, -axle]) {
-        for (const wy of [-track, track]) {
-          roundRect(ctx, wx - L * 0.1, wy - W * 0.1, L * 0.2, W * 0.2, 2);
-          ctx.fill();
+    if (!destroyed) {
+      if (art.body === 'bike') {
+        ctx.fillStyle = '#17171a';
+        ctx.save();
+        ctx.translate(axle * 1.1, 0);
+        ctx.rotate(Math.PI / 2);
+        roundRect(ctx, -2.6, -4, 5.2, 8, 2.4);
+        ctx.fill();
+        ctx.restore();
+        ctx.save();
+        ctx.translate(-axle * 1.1, 0);
+        ctx.rotate(Math.PI / 2);
+        roundRect(ctx, -3.2, -5, 6.4, 10, 3);
+        ctx.fill();
+        ctx.restore();
+      } else {
+        ctx.fillStyle = '#17171a';
+        for (const wx of [axle, -axle]) {
+          for (const wy of [-track, track]) {
+            if (stage >= 2 && wx > 0 && wy > 0) continue;
+            roundRect(ctx, wx - L * 0.1, wy - W * 0.1, L * 0.2, W * 0.2, 2);
+            ctx.fill();
+          }
         }
-      }
-      ctx.fillStyle = 'rgba(190, 196, 200, 0.3)';
-      for (const wx of [axle, -axle]) {
-        for (const wy of [-track, track]) {
-          ctx.fillRect(wx - 2, wy - 1, 4, 2);
+        ctx.fillStyle = 'rgba(190, 196, 200, 0.3)';
+        for (const wx of [axle, -axle]) {
+          for (const wy of [-track, track]) {
+            ctx.fillRect(wx - 2, wy - 1, 4, 2);
+          }
         }
       }
     }
@@ -1756,7 +1874,6 @@ export class Renderer {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // Hood and trunk creases.
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.13)';
     ctx.lineWidth = 0.9;
     ctx.beginPath();
@@ -1766,8 +1883,7 @@ export class Renderer {
     ctx.lineTo(L * 0.3, W * 0.36);
     ctx.stroke();
 
-    // Cabin glass and roof.
-    if (art.body !== 'bike') {
+    if (art.body !== 'bike' && !art.open) {
       const roofLen = L * (art.roof || 0.4);
       const roofW = W * 0.72;
       ctx.fillStyle = destroyed ? '#1b1a1f' : 'rgba(32, 50, 58, 0.92)';
@@ -1777,26 +1893,27 @@ export class Renderer {
       glass.addColorStop(0, 'rgba(144, 205, 218, 0.5)');
       glass.addColorStop(0.5, 'rgba(54, 92, 108, 0.35)');
       glass.addColorStop(1, 'rgba(120, 177, 190, 0.35)');
-      ctx.fillStyle = glass;
+      ctx.fillStyle = destroyed ? '#2b2a2e' : glass;
       roundRect(ctx, -roofLen * 0.48 + (art.body === 'van' ? -L * 0.06 : L * 0.02), -roofW * 0.44, roofLen * 0.96, roofW * 0.88, 2);
       ctx.fill();
       ctx.strokeStyle = 'rgba(230, 245, 245, 0.22)';
       ctx.stroke();
-      // Roof panel if van/box.
       if (art.body === 'van' || art.body === 'box') {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
         ctx.fillRect(-roofLen * 0.8, -roofW * 0.36, roofLen * 0.6, roofW * 0.72);
       }
+    } else if (art.open && !destroyed) {
+      ctx.fillStyle = 'rgba(20, 28, 34, 0.9)';
+      roundRect(ctx, -L * 0.17, -W * 0.32, L * 0.36, W * 0.64, 3);
+      ctx.fill();
     }
 
-    // Stripes.
     if (cfg.stripe && !destroyed) {
       ctx.fillStyle = 'rgba(245, 240, 226, 0.7)';
       ctx.fillRect(-L * 0.42, -W * 0.07, L * 0.84, W * 0.06);
       ctx.fillRect(-L * 0.42, W * 0.01, L * 0.84, W * 0.06);
     }
 
-    // Police livery and light bar.
     if (cfg.isPolice) {
       ctx.fillStyle = 'rgba(28, 34, 44, 0.88)';
       ctx.fillRect(-L * 0.3, -W * 0.49, L * 0.6, W * 0.12);
@@ -1825,8 +1942,6 @@ export class Renderer {
       }
     }
 
-    // Headlights and taillights. A parked car is dark: its lamps are only
-    // cosmetic, never a light source or a pale nose blob.
     const headOn = v.headlightsOn && !destroyed && v.aiMode !== 'parked';
     ctx.fillStyle = headOn ? 'rgba(255, 244, 205, 0.94)' : 'rgba(150, 145, 132, 0.4)';
     this.headlightShapes(ctx, art.body, L, W);
@@ -1844,37 +1959,111 @@ export class Renderer {
       ctx.fill();
     }
 
-    // Driver silhouette.
-    if (v.driver && art.body !== 'bike') {
+    if (v.driver && art.body !== 'bike' && !art.open) {
       ctx.fillStyle = 'rgba(30, 26, 30, 0.8)';
       ctx.beginPath();
       ctx.arc(L * 0.06, -W * 0.16, 3.2, 0, TAU);
       ctx.fill();
     }
 
-    // Spoiler.
     if (art.spoiler) {
       ctx.fillStyle = this.shade(bodyColor, -0.35);
       ctx.fillRect(-L * 0.51, -W * 0.42, 3.4, W * 0.84);
     }
-    // Hood scoop.
     if (art.scoop) {
       ctx.fillStyle = this.shade(bodyColor, -0.3);
       roundRect(ctx, L * 0.14, -W * 0.12, L * 0.16, W * 0.24, 2);
       ctx.fill();
     }
 
-    // Damage soot.
-    if (v.hp < v.maxHp * 0.5 && !destroyed) {
-      ctx.fillStyle = `rgba(28, 24, 26, ${clamp(1 - v.hp / (v.maxHp * 0.5), 0, 1) * 0.5})`;
-      ctx.beginPath();
-      ctx.ellipse(-L * 0.18, W * 0.08, L * 0.24, W * 0.3, 0.2, 0, TAU);
-      ctx.fill();
-    }
-    if (destroyed) {
-      ctx.fillStyle = 'rgba(10, 9, 12, 0.55)';
+    // Damage: scratches/dents, broken glass, soot, fire.
+    if (!destroyed) {
+      for (let i = 0; i < v.marks.length; i += 1) {
+        const m = v.marks[i];
+        if (stage === 0 && i > 1) continue;
+        if (m.kind === 'dent') {
+          ctx.fillStyle = `rgba(20, 18, 22, ${0.22 + stage * 0.1})`;
+          ctx.beginPath();
+          ctx.ellipse(m.x, m.y, m.r, m.r * 0.7, 0.3, 0, TAU);
+          ctx.fill();
+        } else {
+          ctx.strokeStyle = `rgba(235, 230, 220, ${0.12 + stage * 0.06})`;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(m.x - m.r, m.y - 1);
+          ctx.lineTo(m.x + m.r, m.y + 1);
+          ctx.stroke();
+        }
+      }
+      if (stage >= 1 && v.brokenGlass) {
+        ctx.strokeStyle = 'rgba(210, 238, 242, 0.55)';
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(-L * 0.14, -W * 0.18);
+        ctx.lineTo(-L * 0.05, -W * 0.08);
+        ctx.lineTo(-L * 0.12, W * 0.02);
+        ctx.moveTo(-L * 0.05, -W * 0.08);
+        ctx.lineTo(-L * 0.02, W * 0.1);
+        ctx.stroke();
+      }
+      if (stage >= 1) {
+        ctx.fillStyle = `rgba(28, 24, 26, ${clamp((1 - v.hp / v.maxHp) * 0.65, 0.08, 0.6)})`;
+        ctx.beginPath();
+        ctx.ellipse(-L * 0.18, W * 0.08, L * 0.24, W * 0.3, 0.2, 0, TAU);
+        ctx.fill();
+      }
+      if (v.isBurning) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const f = 0.6 + Math.sin((game.worldTime || 0) * 22) * 0.25;
+        ctx.fillStyle = `rgba(255, 120, 32, ${0.35 * f})`;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, L * 0.38, W * 0.42, 0, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+        this.drawFlame(ctx, L * 0.1, 0, 1);
+      }
+    } else {
+      ctx.fillStyle = 'rgba(10, 9, 12, 0.58)';
       ctx.beginPath();
       ctx.ellipse(0, 0, L * 0.38, W * 0.42, 0, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(90, 72, 58, 0.4)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(-L * 0.3, -W * 0.3);
+      ctx.lineTo(L * 0.2, W * 0.2);
+      ctx.moveTo(L * 0.1, -W * 0.3);
+      ctx.lineTo(-L * 0.2, W * 0.28);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Stunt flame trail while airborne.
+    if (lift > 2) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = 'rgba(255, 200, 120, 0.16)';
+      ctx.beginPath();
+      ctx.ellipse(v.x, v.y, v.width * 0.7, v.length * 0.6, v.angle, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  drawFlame(ctx, x, y, scale) {
+    const t = (this.frame * 0.21) % 1;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 3; i += 1) {
+      const h = (10 + i * 5) * scale + Math.sin(t * 6 + i) * 3;
+      ctx.fillStyle = i === 0 ? 'rgba(255, 226, 120, 0.85)' : i === 1 ? 'rgba(255, 138, 40, 0.7)' : 'rgba(255, 70, 20, 0.55)';
+      ctx.beginPath();
+      ctx.moveTo(-3 * scale, 3);
+      ctx.quadraticCurveTo(-7 * scale, -h * 0.5, 0, -h);
+      ctx.quadraticCurveTo(7 * scale, -h * 0.5, 3 * scale, 3);
+      ctx.closePath();
       ctx.fill();
     }
     ctx.restore();
@@ -1883,22 +2072,79 @@ export class Renderer {
   vehicleSilhouette(ctx, body, L, W, outline) {
     const hx = L / 2;
     const hy = W / 2;
+    const inset = outline ? 1.4 : 0;
     if (body === 'bike') {
       ctx.beginPath();
-      ctx.moveTo(-hx * 0.9, -hy * 0.5);
-      ctx.lineTo(-hx * 0.15, -hy);
-      ctx.lineTo(hx * 0.55, -hy * 0.72);
+      ctx.moveTo(-hx * 0.9, -hy * 0.5 + inset);
+      ctx.lineTo(-hx * 0.15, -hy + inset);
+      ctx.lineTo(hx * 0.55, -hy * 0.72 + inset);
       ctx.lineTo(hx, 0);
-      ctx.lineTo(hx * 0.55, hy * 0.72);
-      ctx.lineTo(-hx * 0.15, hy);
-      ctx.lineTo(-hx * 0.9, hy * 0.5);
+      ctx.lineTo(hx * 0.55, hy * 0.72 - inset);
+      ctx.lineTo(-hx * 0.15, hy - inset);
+      ctx.lineTo(-hx * 0.9, hy * 0.5 - inset);
       ctx.lineTo(-hx, 0);
       ctx.closePath();
       return;
     }
-    const nose = body === 'sports' ? 0.24 : body === 'muscle' ? 0.16 : body === 'van' || body === 'box' ? 0.08 : 0.12;
-    const tail = body === 'sports' ? 0.78 : body === 'van' || body === 'box' ? 0.94 : 0.88;
-    const inset = outline ? 1.4 : 0;
+    if (body === 'sports') {
+      ctx.beginPath();
+      ctx.moveTo(-hx * 0.86, -hy * 0.72 + inset);
+      ctx.lineTo(-hx * 0.5, -hy + inset);
+      ctx.lineTo(hx * 0.26, -hy * 0.92 + inset);
+      ctx.lineTo(hx * 0.68, -hy * 0.6 + inset);
+      ctx.lineTo(hx * 0.92, -hy * 0.3 + inset);
+      ctx.quadraticCurveTo(hx, 0, hx * 0.92, hy * 0.3 - inset);
+      ctx.lineTo(hx * 0.68, hy * 0.6 - inset);
+      ctx.lineTo(hx * 0.26, hy * 0.92 - inset);
+      ctx.lineTo(-hx * 0.5, hy - inset);
+      ctx.lineTo(-hx * 0.86, hy * 0.72 - inset);
+      ctx.quadraticCurveTo(-hx * 0.96, 0, -hx * 0.86, -hy * 0.72 + inset);
+      ctx.closePath();
+      return;
+    }
+    if (body === 'muscle') {
+      ctx.beginPath();
+      ctx.moveTo(-hx * 0.94, -hy * 0.78 + inset);
+      ctx.lineTo(-hx * 0.78, -hy + inset);
+      ctx.lineTo(hx * 0.5, -hy + inset);
+      ctx.lineTo(hx * 0.82, -hy * 0.7 + inset);
+      ctx.lineTo(hx * 0.94, -hy * 0.32 + inset);
+      ctx.lineTo(hx * 0.94, hy * 0.32 - inset);
+      ctx.lineTo(hx * 0.82, hy * 0.7 - inset);
+      ctx.lineTo(hx * 0.5, hy - inset);
+      ctx.lineTo(-hx * 0.78, hy - inset);
+      ctx.lineTo(-hx * 0.94, hy * 0.78 - inset);
+      ctx.closePath();
+      return;
+    }
+    if (body === 'van' || body === 'box') {
+      ctx.beginPath();
+      ctx.moveTo(-hx * 0.96, -hy * 0.86 + inset);
+      ctx.lineTo(hx * 0.7, -hy * 0.86 + inset);
+      ctx.lineTo(hx * 0.94, -hy * 0.6 + inset);
+      ctx.lineTo(hx, -hy * 0.2 + inset);
+      ctx.lineTo(hx, hy * 0.2 - inset);
+      ctx.lineTo(hx * 0.94, hy * 0.6 - inset);
+      ctx.lineTo(hx * 0.7, hy * 0.86 - inset);
+      ctx.lineTo(-hx * 0.96, hy * 0.86 - inset);
+      ctx.closePath();
+      return;
+    }
+    if (body === 'suv') {
+      ctx.beginPath();
+      ctx.moveTo(-hx * 0.9, -hy * 0.82 + inset);
+      ctx.lineTo(hx * 0.55, -hy * 0.92 + inset);
+      ctx.lineTo(hx * 0.84, -hy * 0.66 + inset);
+      ctx.lineTo(hx * 0.94, -hy * 0.3 + inset);
+      ctx.lineTo(hx * 0.94, hy * 0.3 - inset);
+      ctx.lineTo(hx * 0.84, hy * 0.66 - inset);
+      ctx.lineTo(hx * 0.55, hy * 0.92 - inset);
+      ctx.lineTo(-hx * 0.9, hy * 0.82 - inset);
+      ctx.closePath();
+      return;
+    }
+    const nose = body === 'police' ? 0.2 : 0.12;
+    const tail = body === 'police' ? 0.9 : 0.88;
     ctx.beginPath();
     ctx.moveTo(-hx * tail, -hy * 0.88 + inset);
     ctx.lineTo(-hx * 0.72, -hy + inset);
@@ -1930,6 +2176,9 @@ export class Renderer {
     ctx.fill();
   }
 
+  // =================================================================
+  // People
+  // =================================================================
   drawPlayer(game, p) {
     this.drawPerson(game, p, {
       shirt: '#e8c26a',
@@ -1963,10 +2212,17 @@ export class Renderer {
       skin: '#c99a72',
       hair: '#1f1a18',
       vest: e.isBoss,
+      helmet: e.isBoss,
     }, false);
     this.drawGunArm(e.x, e.y, e.angle, false, e.isBoss ? '#d7b15c' : '#22262a');
     if (e.isBoss) {
       ctxRing(this.ctx, e.x, e.y, 22, 'rgba(255, 209, 102, 0.3)');
+    }
+    if (e.crouched) {
+      this.ctx.fillStyle = 'rgba(255, 209, 102, 0.35)';
+      this.ctx.font = '900 8px Arial, sans-serif';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText('COVER', e.x, e.y - 30);
     }
   }
 
@@ -1982,7 +2238,9 @@ export class Renderer {
       hair: p.hair,
       hat: p.hat,
       umbrella: p.umbrella,
+      umbrellaColor: p.umbrellaColor,
       bag: p.bag,
+      phone: p.phone,
       cop: isCop,
     }, false);
   }
@@ -1994,29 +2252,27 @@ export class Renderer {
     const phase = p.walkPhase || p.walkCycle || 0;
     const swing = walking ? Math.sin(phase) : 0;
     const bob = walking ? Math.abs(Math.cos(phase)) * 1.3 : 0;
-    const alpha = p.hitFlash > 0.02 ? 1 : 1;
     ctx.save();
     ctx.translate(p.x, p.y - bob);
     if (p.isRolling) ctx.rotate(Math.sin((p.rollTimer || 0) * 16) * 0.3);
-    ctx.globalAlpha = alpha;
+    if (p.meleeSwing > 0) ctx.rotate(p.meleeSide * Math.sin((0.22 - p.meleeSwing) * 22) * 0.12);
 
     const skin = look.skin || '#d9a87c';
     const shirt = look.shirt || '#6a7b8a';
     const pants = look.pants || '#33404b';
-    const dead = p.isDead;
 
     // Legs.
     ctx.fillStyle = pants;
     if (face === 3 || face === 1) {
       const dir = face === 3 ? 1 : -1;
-      roundRect(ctx, -2.6 + swing * 2.6 * dir, 3, 4.2, 8, 2);
+      roundRect(ctx, -2.6 + swing * 2.8 * dir, 3, 4.2, 8, 2);
       ctx.fill();
-      roundRect(ctx, -1.5 - swing * 2.6 * dir, 3, 4.2, 8, 2);
+      roundRect(ctx, -1.5 - swing * 2.8 * dir, 3, 4.2, 8, 2);
       ctx.fill();
     } else {
-      roundRect(ctx, -5.4, 3 + swing * 1.8, 4.2, 8, 2);
+      roundRect(ctx, -5.4, 3 + swing * 2.1, 4.2, 8, 2);
       ctx.fill();
-      roundRect(ctx, 1.2, 3 - swing * 1.8, 4.2, 8, 2);
+      roundRect(ctx, 1.2, 3 - swing * 2.1, 4.2, 8, 2);
       ctx.fill();
     }
 
@@ -2055,19 +2311,19 @@ export class Renderer {
     // Arms.
     ctx.fillStyle = skin;
     if (face === 3) {
-      roundRect(ctx, 3.6, -4 + swing * 1.6, 4.4, 3.4, 1.6);
+      roundRect(ctx, 3.6, -4 + swing * 1.8, 4.4, 3.4, 1.6);
       ctx.fill();
-      roundRect(ctx, 3.6, 1 - swing * 1.6, 4.4, 3.4, 1.6);
+      roundRect(ctx, 3.6, 1 - swing * 1.8, 4.4, 3.4, 1.6);
       ctx.fill();
     } else if (face === 1) {
-      roundRect(ctx, -8, -4 + swing * 1.6, 4.4, 3.4, 1.6);
+      roundRect(ctx, -8, -4 + swing * 1.8, 4.4, 3.4, 1.6);
       ctx.fill();
-      roundRect(ctx, -8, 1 - swing * 1.6, 4.4, 3.4, 1.6);
+      roundRect(ctx, -8, 1 - swing * 1.8, 4.4, 3.4, 1.6);
       ctx.fill();
     } else {
-      roundRect(ctx, -8.4, -4 + swing * 1.4, 3.4, 7, 1.6);
+      roundRect(ctx, -8.4, -4 + swing * 1.5, 3.4, 7, 1.6);
       ctx.fill();
-      roundRect(ctx, 5, -4 - swing * 1.4, 3.4, 7, 1.6);
+      roundRect(ctx, 5, -4 - swing * 1.5, 3.4, 7, 1.6);
       ctx.fill();
     }
 
@@ -2120,10 +2376,20 @@ export class Renderer {
       ctx.fillStyle = '#ffd166';
       ctx.fillRect(-0.8, -10.2, 1.6, 1.2);
     }
+    if (look.helmet) {
+      ctx.fillStyle = '#23252a';
+      ctx.beginPath();
+      ctx.arc(0, -9, 5, Math.PI, TAU);
+      ctx.fill();
+    }
     if (look.bag) {
       ctx.fillStyle = '#7d5a3c';
       roundRect(ctx, 4.8, 1, 3.8, 6, 1.6);
       ctx.fill();
+    }
+    if (look.phone) {
+      ctx.fillStyle = 'rgba(120, 230, 220, 0.9)';
+      ctx.fillRect(2.2, -1, 2, 3);
     }
     if (look.umbrella) {
       ctx.strokeStyle = '#4a4038';
@@ -2132,7 +2398,7 @@ export class Renderer {
       ctx.moveTo(2, -2);
       ctx.lineTo(2, -18);
       ctx.stroke();
-      ctx.fillStyle = p.umbrellaColor || '#ff7f9e';
+      ctx.fillStyle = look.umbrellaColor || '#ff7f9e';
       ctx.beginPath();
       ctx.arc(2, -19, 11, Math.PI, TAU);
       ctx.fill();
@@ -2146,7 +2412,6 @@ export class Renderer {
       }
     }
 
-    // Hit flash / aim weapon for the player.
     if (isPlayer && p.weapon && p.weapon.id !== 'fists') {
       this.drawGunArm(p.x, p.y, p.angle, false, '#d8dde2');
     }
@@ -2157,9 +2422,8 @@ export class Renderer {
       ctx.arc(0, -2, 10, 0, TAU);
       ctx.fill();
     }
-    void game;
-    void dead;
     ctx.restore();
+    void game;
   }
 
   drawGunArm(x, y, angle, dead, color = '#222') {
@@ -2199,7 +2463,7 @@ export class Renderer {
   }
 
   // =================================================================
-  // Bullets, particles, markers
+  // Bullets, grenades, particles
   // =================================================================
   drawBullets(game) {
     const ctx = this.ctx;
@@ -2221,6 +2485,40 @@ export class Renderer {
       ctx.stroke();
     }
     ctx.restore();
+  }
+
+  drawGrenades(game) {
+    const ctx = this.ctx;
+    for (const g of game.combat?.grenades || []) {
+      if (!this.inView(g.x, g.y, 40)) continue;
+      const z = g.z || 0;
+      // Ground shadow shrinks with height.
+      ctx.fillStyle = `rgba(10, 10, 14, ${clamp(0.28 - z * 0.0015, 0.08, 0.28)})`;
+      ctx.beginPath();
+      ctx.ellipse(g.x, g.y + 2, 5, 3, 0, 0, TAU);
+      ctx.fill();
+      ctx.save();
+      ctx.translate(g.x, g.y - z * 0.35);
+      ctx.rotate(g.spin || 0);
+      ctx.fillStyle = '#3d4a35';
+      roundRect(ctx, -3.6, -4.4, 7.2, 8.8, 3);
+      ctx.fill();
+      ctx.fillStyle = '#252c22';
+      ctx.fillRect(-2.4, -4.8, 4.8, 1.6);
+      ctx.fillStyle = '#9aa887';
+      ctx.fillRect(-1.6, -1.4, 3.2, 1);
+      if (g.fuse < 0.55) {
+        const pulse = 0.5 + 0.5 * Math.sin((game.worldTime || 0) * 30);
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = `rgba(255, 70, 40, ${0.3 + pulse * 0.5})`;
+        ctx.beginPath();
+        ctx.arc(0, -5, 5, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.restore();
+    }
   }
 
   drawParticles(game) {
@@ -2287,6 +2585,20 @@ export class Renderer {
       } else if (p.type === 'casing') {
         ctx.fillStyle = `rgba(230, 190, 105, ${life})`;
         ctx.fillRect(p.x, p.y, 2.4, 1.4);
+      } else if (p.type === 'glass') {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.spin || 0);
+        ctx.fillStyle = p.color || 'rgba(170, 230, 238, 0.8)';
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.7);
+        ctx.restore();
+      } else if (p.type === 'debris') {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.spin || 0);
+        ctx.fillStyle = p.color || '#5a5148';
+        ctx.fillRect(-p.size / 2, -p.size / 3, p.size, p.size * 0.7);
+        ctx.restore();
       } else if (p.type === 'splash' || p.type === 'rain') {
         ctx.strokeStyle = p.color || 'rgba(210, 240, 240, 0.6)';
         ctx.globalAlpha = life;
@@ -2298,7 +2610,6 @@ export class Renderer {
       }
     }
 
-    // Floating cash.
     for (const c of game.particles?.cashPickups || []) {
       if (!this.inView(c.x, c.y, 30)) continue;
       const bob = Math.sin(c.bob) * 2.5;
@@ -2319,14 +2630,16 @@ export class Renderer {
     }
   }
 
+  // =================================================================
+  // Markers
+  // =================================================================
   drawMarkers(game) {
-    // Title, controls and pause screens own the frame; world objective rings
-    // would read as stray debug circles behind the menu.
     if (game.state === 'title' || game.state === 'controls') return;
     const ctx = this.ctx;
+    const time = game.worldTime || 0;
     const marker = game.missions?.availableMarker?.();
     if (marker && this.inView(marker.x, marker.y, 80)) {
-      const pulse = 0.5 + 0.5 * Math.sin((game.worldTime || 0) * 2.6);
+      const pulse = 0.5 + 0.5 * Math.sin(time * 2.6);
       const rr = Math.min(marker.radius, 48);
       ctx.save();
       ctx.translate(marker.x, marker.y);
@@ -2357,7 +2670,6 @@ export class Renderer {
       ctx.restore();
     }
 
-    // Pickups.
     for (const p of game.pickups?.pickups || []) {
       if (!p.active || !this.inView(p.x, p.y, 30)) continue;
       const bob = Math.sin(p.bob) * 3;
@@ -2383,11 +2695,56 @@ export class Renderer {
       ctx.restore();
     }
 
-    // Mission objective ring. No filled disc: the gold ring and the objective
-    // card carry the read, so the car and actors stay unobscured.
+    // Mixtapes: a slowly turning cassette with a soft halo.
+    for (const item of game.collectibles?.items || []) {
+      if (item.found || !this.inView(item.x, item.y, 40)) continue;
+      const bob = Math.sin(item.bob) * 4;
+      ctx.save();
+      ctx.translate(item.x, item.y + bob);
+      const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 24);
+      g.addColorStop(0, this.hexAlpha(item.color, 0.32));
+      g.addColorStop(0.5, this.hexAlpha(item.color, 0.1));
+      g.addColorStop(1, this.hexAlpha(item.color, 0));
+      ctx.fillStyle = g;
+      ctx.fillRect(-24, -24, 48, 48);
+      ctx.rotate(Math.sin(item.bob * 0.6) * 0.16);
+      ctx.fillStyle = 'rgba(20, 18, 24, 0.85)';
+      roundRect(ctx, -11, -7, 22, 14, 2);
+      ctx.fill();
+      ctx.fillStyle = item.color;
+      roundRect(ctx, -9, -5, 18, 10, 1.5);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(20, 18, 24, 0.8)';
+      ctx.beginPath();
+      ctx.arc(-3.5, 0, 2.6, 0, TAU);
+      ctx.arc(3.5, 0, 2.6, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(20, 18, 24, 0.7)';
+      ctx.fillRect(-9, 4, 18, 1.4);
+      ctx.restore();
+    }
+
+    // Garage repair rings.
+    for (const garage of game.city.garages || []) {
+      if (!this.inView(garage.x, garage.y, 100)) continue;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 180, 92, 0.3)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 8]);
+      ctx.beginPath();
+      ctx.arc(garage.x, garage.y, 66, 0, TAU);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255, 180, 92, 0.7)';
+      ctx.font = '900 9px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('REPAIR', garage.x, garage.y - 74);
+      ctx.restore();
+    }
+
     const target = game.missions?.active ? game.missions.currentTarget() : null;
     if (target && this.inView(target.x, target.y, 60)) {
-      const pulse = 0.5 + 0.5 * Math.sin((game.worldTime || 0) * 3 + 1);
+      const pulse = 0.5 + 0.5 * Math.sin(time * 3 + 1);
       const rr = Math.max(22, target.radius * 0.5);
       ctx.save();
       ctx.translate(target.x, target.y);
@@ -2406,22 +2763,98 @@ export class Renderer {
   }
 
   // =================================================================
-  // Weather (world and screen) and reticle
+  // Neon bloom
+  // =================================================================
+  drawNeon(game) {
+    const li = this.lightInfo(game);
+    if (li.dark < 0.05) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const b of game.city.buildings) {
+      if (!b.neonText || !this.inView(b.x, b.y, 80)) continue;
+      const x = b.x;
+      const y = b.y - b.h / 2 + b.h - 15;
+      const g = ctx.createRadialGradient(x, y, 1, x, y, 26);
+      g.addColorStop(0, this.hexAlpha(b.neonColor, 0.36 * li.dark));
+      g.addColorStop(0.45, this.hexAlpha(b.neonColor, 0.13 * li.dark));
+      g.addColorStop(0.78, this.hexAlpha(b.neonColor, 0.034 * li.dark));
+      g.addColorStop(1, this.hexAlpha(b.neonColor, 0));
+      ctx.fillStyle = g;
+      ctx.fillRect(x - 30, y - 30, 60, 60);
+      ctx.fillStyle = this.hexAlpha(b.neonColor, 0.5 * li.dark);
+      ctx.fillRect(x - 12, y - 2, 24, 4);
+    }
+    for (const light of game.city.streetlights) {
+      if (!this.inView(light.x, light.y, 20)) continue;
+      const g = ctx.createRadialGradient(light.x, light.y, 0, light.x, light.y, 9);
+      g.addColorStop(0, `rgba(255, 238, 196, ${0.8 * li.dark})`);
+      g.addColorStop(1, 'rgba(255, 220, 160, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(light.x - 10, light.y - 10, 20, 20);
+    }
+    for (const billboard of game.city.billboards) {
+      if (!this.inView(billboard.x, billboard.y, 90)) continue;
+      const g = ctx.createRadialGradient(billboard.x, billboard.y - 5, 1, billboard.x, billboard.y - 5, 44);
+      g.addColorStop(0, this.hexAlpha(billboard.color, 0.32 * li.dark));
+      g.addColorStop(0.5, this.hexAlpha(billboard.color, 0.1 * li.dark));
+      g.addColorStop(1, this.hexAlpha(billboard.color, 0));
+      ctx.fillStyle = g;
+      ctx.fillRect(billboard.x - 46, billboard.y - 51, 92, 92);
+      ctx.fillStyle = this.hexAlpha(billboard.color, 0.45 * li.dark);
+      ctx.fillRect(billboard.x - 26, billboard.y - 8, 52, 3);
+    }
+    for (const cop of game.police?.cops || []) {
+      if (!cop.sirenActive || !this.inView(cop.x, cop.y, 40)) continue;
+      const fx = Math.cos(cop.angle);
+      const fy = Math.sin(cop.angle);
+      const rx = -fy;
+      const ry = fx;
+      const lampX = cop.x + fx * cop.length * 0.16;
+      const lampY = cop.y + fy * cop.length * 0.16;
+      for (const [off, rgb] of [
+        [-cop.width * 0.22, cop.sirenPhase ? '255, 72, 92' : '90, 54, 62'],
+        [cop.width * 0.22, cop.sirenPhase ? '54, 68, 96' : '92, 166, 255'],
+      ]) {
+        const gx = lampX + rx * off;
+        const gy = lampY + ry * off;
+        const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, 13);
+        g.addColorStop(0, `rgba(${rgb}, ${0.26 * li.dark})`);
+        g.addColorStop(0.5, `rgba(${rgb}, ${0.08 * li.dark})`);
+        g.addColorStop(1, `rgba(${rgb}, 0)`);
+        ctx.fillStyle = g;
+        ctx.fillRect(gx - 14, gy - 14, 28, 28);
+      }
+    }
+    ctx.restore();
+  }
+
+  // =================================================================
+  // Weather (world + screen) and reticle
   // =================================================================
   drawWeatherWorld(game) {
     const w = game.weather;
-    if (!w || w.type === 'clear' || w.type === 'haze') return;
+    if (!w || w.type === 'clear') return;
     const ctx = this.ctx;
     const v = this.view;
-    const intensity = w.intensity || 0.5;
+    const intensity = w.intensity || 0.4;
     const time = game.worldTime || 0;
+    if (w.type === 'haze') {
+      const fog = ctx.createLinearGradient(v.x, v.y, v.x, v.y2);
+      fog.addColorStop(0, 'rgba(255, 218, 160, 0.06)');
+      fog.addColorStop(0.5, 'rgba(255, 226, 180, 0.1)');
+      fog.addColorStop(1, 'rgba(255, 218, 160, 0.04)');
+      ctx.fillStyle = fog;
+      ctx.fillRect(v.x, v.y, v.w, v.h);
+      return;
+    }
     ctx.save();
     ctx.strokeStyle = `rgba(190, 224, 232, ${0.22 + intensity * 0.24})`;
     ctx.lineWidth = 1.1;
-    const count = Math.floor(120 + intensity * 220);
+    const count = Math.floor(120 + intensity * 230);
     for (let i = 0; i < count; i += 1) {
       const seed = (i * 73.13 + time * 310) % 620;
-      const x = v.x - 120 + ((i * 137.7 + time * 160) % (v.x2 - v.x + 240));
+      const x = v.x - 120 + ((i * 137.7 + time * 160) % (v.w + 240));
       const y = v.y - 120 + seed;
       const len = 9 + (i % 5) * 3;
       ctx.beginPath();
@@ -2433,6 +2866,17 @@ export class Renderer {
         ctx.beginPath();
         ctx.arc(x, y + len, 2.2, 0, TAU);
         ctx.fill();
+      }
+    }
+    if (w.type === 'storm') {
+      ctx.strokeStyle = `rgba(220, 232, 255, ${0.04 + intensity * 0.05})`;
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 5; i += 1) {
+        const x = v.x + ((i * 317 + time * 90) % v.w);
+        ctx.beginPath();
+        ctx.moveTo(x, v.y);
+        ctx.lineTo(x - 40, v.y2);
+        ctx.stroke();
       }
     }
     ctx.restore();
@@ -2463,44 +2907,90 @@ export class Renderer {
       ctx.lineTo(wx + Math.cos(a) * (spread + 6), wy + Math.sin(a) * (spread + 6));
       ctx.stroke();
     }
+    if (p.meleeCombo > 0 && p.comboTimer > 0 && p.weapon?.id === 'fists') {
+      ctx.fillStyle = 'rgba(255, 209, 102, 0.8)';
+      ctx.font = '900 9px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(['', 'JAB', 'CROSS', 'FINISH'][p.meleeCombo] || '', wx, wy - 18);
+    }
     ctx.restore();
   }
 
   drawAtmosphere(game) {
     const ctx = this.ctx;
-    const dark = this.lightLevel(game);
+    const li = this.lightInfo(game);
     const w = game.weather;
-    const wet = w?.wetness || 0;
 
-    // Warm/cool colour grade.
-    if (dark > 0.01) {
+    // A light final grade: the heavy lifting is the world-space wash above.
+    if (li.dark > 0.01) {
       const g = ctx.createLinearGradient(0, 0, this.width, this.height);
-      g.addColorStop(0, `rgba(44, 30, 58, ${dark * 0.28})`);
-      g.addColorStop(0.5, `rgba(20, 22, 48, ${dark * 0.4})`);
-      g.addColorStop(1, `rgba(10, 24, 40, ${dark * 0.35})`);
+      g.addColorStop(0, `rgba(22, 18, 54, ${li.dark * 0.1})`);
+      g.addColorStop(0.5, `rgba(9, 15, 44, ${li.dark * 0.13})`);
+      g.addColorStop(1, `rgba(5, 13, 34, ${li.dark * 0.11})`);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
+    if (li.dusk > 0.2) {
+      const g = ctx.createLinearGradient(0, 0, this.width, this.height);
+      g.addColorStop(0, `rgba(255, 132, 92, ${li.dusk * 0.13})`);
+      g.addColorStop(0.6, `rgba(140, 66, 98, ${li.dusk * 0.08})`);
+      g.addColorStop(1, `rgba(40, 30, 60, ${li.dusk * 0.1})`);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
+    if (li.dawn > 0.2) {
+      const g = ctx.createLinearGradient(0, 0, this.width, this.height);
+      g.addColorStop(0, `rgba(255, 168, 170, ${li.dawn * 0.11})`);
+      g.addColorStop(0.6, `rgba(160, 120, 160, ${li.dawn * 0.06})`);
+      g.addColorStop(1, `rgba(50, 50, 90, ${li.dawn * 0.08})`);
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, this.width, this.height);
     }
 
-    // A soft sun/ambient bloom in the warm hours.
-    const day = 1 - dark;
-    if (day > 0.15) {
-      const sun = ctx.createRadialGradient(this.width * 0.82, this.height * 0.12, 20, this.width * 0.82, this.height * 0.12, this.width * 0.72);
-      sun.addColorStop(0, `rgba(255, 200, 130, ${0.11 * day})`);
-      sun.addColorStop(0.5, `rgba(255, 160, 120, ${0.04 * day})`);
+    // Sun / moon glow.
+    const sunX = this.width * (0.12 + 0.76 * li.t);
+    const sunY = this.height * 0.16;
+    if (li.daylight > 0.12) {
+      const sun = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, this.width * 0.62);
+      sun.addColorStop(0, `rgba(255, 226, 168, ${0.16 * li.daylight})`);
+      sun.addColorStop(0.45, `rgba(255, 172, 118, ${0.06 * li.daylight})`);
       sun.addColorStop(1, 'rgba(255, 140, 110, 0)');
       ctx.fillStyle = sun;
       ctx.fillRect(0, 0, this.width, this.height);
+    } else {
+      const moon = ctx.createRadialGradient(this.width * 0.74, this.height * 0.12, 4, this.width * 0.74, this.height * 0.12, 240);
+      moon.addColorStop(0, 'rgba(198, 220, 255, 0.16)');
+      moon.addColorStop(0.4, 'rgba(150, 184, 255, 0.05)');
+      moon.addColorStop(1, 'rgba(120, 160, 255, 0)');
+      ctx.fillStyle = moon;
+      ctx.fillRect(0, 0, this.width, this.height);
+      // Stars, deterministic and faint.
+      ctx.fillStyle = 'rgba(230, 240, 255, 0.5)';
+      for (let i = 0; i < 28; i += 1) {
+        const x = (i * 197 + 53) % this.width;
+        const y = (i * 83 + 29) % (this.height * 0.5);
+        const a = 0.15 + 0.25 * Math.abs(Math.sin(i + (game.worldTime || 0) * 0.3));
+        ctx.globalAlpha = a * clamp(li.night, 0, 1);
+        ctx.fillRect(x, y, 1.6, 1.6);
+      }
+      ctx.globalAlpha = 1;
     }
 
-    // Rain film on the lens, kept light so the chase's actors stay legible.
+    // Haze/fog on screen.
+    if (w && (w.type === 'haze' || w.type === 'rain' || w.type === 'storm')) {
+      const fog = w.type === 'storm' ? 0.14 : w.type === 'rain' ? 0.09 : 0.1;
+      ctx.fillStyle = `rgba(214, 224, 226, ${fog})`;
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
+
+    // Rain on the lens.
     if (w && (w.type === 'rain' || w.type === 'storm')) {
       const intensity = w.intensity || 0.5;
       ctx.save();
-      ctx.strokeStyle = `rgba(190, 224, 232, ${0.018 + intensity * 0.024})`;
+      ctx.strokeStyle = `rgba(190, 224, 232, ${0.016 + intensity * 0.024})`;
       ctx.lineWidth = 1;
       const time = game.worldTime || 0;
-      for (let i = 0; i < 72; i += 1) {
+      for (let i = 0; i < 80; i += 1) {
         const x = (i * 97 + Math.sin(time * 0.3 + i) * 30) % this.width;
         const y = (i * 53 + time * 180) % this.height;
         ctx.beginPath();
@@ -2511,27 +3001,28 @@ export class Renderer {
       ctx.restore();
     }
 
-    // Wet blue wash.
+    // Wet wash.
+    const wet = w?.wetness || 0;
     if (wet > 0.05) {
-      ctx.fillStyle = `rgba(38, 68, 84, ${wet * 0.035})`;
+      ctx.fillStyle = `rgba(38, 80, 98, ${wet * 0.045})`;
       ctx.fillRect(0, 0, this.width, this.height);
     }
 
     // Lightning.
     if (w?.flash > 0) {
-      ctx.fillStyle = `rgba(220, 236, 255, ${Math.min(0.45, w.flash * 0.45)})`;
+      ctx.fillStyle = `rgba(220, 236, 255, ${Math.min(0.48, w.flash * 0.46)})`;
       ctx.fillRect(0, 0, this.width, this.height);
     }
 
     // Vignette.
     const vig = ctx.createRadialGradient(this.width / 2, this.height / 2, this.height * 0.34, this.width / 2, this.height / 2, this.width * 0.72);
     vig.addColorStop(0, 'rgba(8, 8, 14, 0)');
-    vig.addColorStop(1, `rgba(8, 8, 14, ${0.34 + dark * 0.2})`);
+    vig.addColorStop(1, `rgba(8, 8, 14, ${0.34 + li.dark * 0.2})`);
     ctx.fillStyle = vig;
     ctx.fillRect(0, 0, this.width, this.height);
 
     // Very light scanline texture for the canvas look.
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.012)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.011)';
     for (let y = 0; y < this.height; y += 4) ctx.fillRect(0, y, this.width, 1);
   }
 }

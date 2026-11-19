@@ -1,7 +1,36 @@
-// Leonida Heat - input.
-// Keyboard state is tracked on window so the game keeps working after the
-// pointer leaves the canvas. Mouse positions are mapped from the letterboxed
-// CSS box back into the fixed 1280x720 backing store, then through the camera.
+// Leonida Heat v3 - input.
+// A small action layer over the keyboard and pointer. Physical key state is
+// tracked on window so the game keeps responding when the pointer leaves the
+// canvas; mouse coordinates are mapped out of the letterboxed CSS box and
+// back into the fixed 1280x720 backing store.
+
+const BLOCKED = new Set([
+  'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Escape',
+  'KeyP', 'KeyW', 'KeyA', 'KeyS', 'KeyD',
+]);
+
+// Logical actions and their default bindings. The game reads actions, not
+// key codes, so rebinding only ever happens here.
+export const BINDINGS = {
+  forward: ['KeyW', 'ArrowUp'],
+  backward: ['KeyS', 'ArrowDown'],
+  left: ['KeyA', 'ArrowLeft'],
+  right: ['KeyD', 'ArrowRight'],
+  sprint: ['ShiftLeft', 'ShiftRight'],
+  handbrake: ['Space'],
+  enter: ['KeyE', 'KeyF'],
+  interact: ['KeyE'],
+  reload: ['KeyR'],
+  pause: ['Escape', 'KeyP'],
+  confirm: ['Enter', 'Space'],
+  mute: ['KeyM'],
+  radio: ['KeyQ'],
+  horn: ['KeyH'],
+  grenade: ['KeyG'],
+  map: ['KeyT'],
+  camera: ['KeyZ'],
+  help: ['Slash'],
+};
 
 export class InputManager {
   constructor(canvas) {
@@ -12,6 +41,7 @@ export class InputManager {
     this.anyGesture = false;
     this.pointerCaptured = false;
     this.usingPointerEvents = typeof window !== 'undefined' && 'PointerEvent' in window;
+    this.lastKeyAt = 0;
     this.mouse = {
       x: 640,
       y: 360,
@@ -23,6 +53,7 @@ export class InputManager {
       rightClicked: false,
       wheel: 0,
       moved: false,
+      inside: false,
     };
     this.handlers = [];
     this.bind();
@@ -34,26 +65,22 @@ export class InputManager {
   }
 
   bind() {
-    const block = new Set([
-      'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Escape', 'KeyP',
-    ]);
-
     this.on(window, 'keydown', (event) => {
       if (event.repeat) {
-        // Held keys are already tracked; do not re-fire one-shot presses.
-        if (block.has(event.code)) event.preventDefault();
+        if (BLOCKED.has(event.code)) event.preventDefault();
         return;
       }
-      if (block.has(event.code)) event.preventDefault();
+      if (BLOCKED.has(event.code)) event.preventDefault();
       if (!this.keysDown.has(event.code)) this.keysPressed.add(event.code);
       this.keysDown.add(event.code);
       this.anyGesture = true;
+      this.lastKeyAt = performance.now();
     });
 
     this.on(window, 'keyup', (event) => {
       this.keysDown.delete(event.code);
       this.keysReleased.add(event.code);
-      if (block.has(event.code)) event.preventDefault();
+      if (BLOCKED.has(event.code)) event.preventDefault();
     });
 
     this.on(window, 'blur', () => this.releaseAll());
@@ -63,12 +90,15 @@ export class InputManager {
 
     const move = (event) => {
       this.setMousePosition(event);
+      this.mouse.inside = true;
       this.anyGesture = true;
       this.mouse.moved = true;
     };
 
     if (this.usingPointerEvents) {
       this.on(this.canvas, 'pointermove', move);
+      this.on(this.canvas, 'pointerenter', () => { this.mouse.inside = true; });
+      this.on(this.canvas, 'pointerleave', () => { this.mouse.inside = false; });
       this.on(this.canvas, 'pointerdown', (event) => {
         this.setMousePosition(event);
         this.anyGesture = true;
@@ -88,7 +118,7 @@ export class InputManager {
           try {
             this.canvas.releasePointerCapture(event.pointerId);
           } catch {
-            // Pointer capture can already be gone after a browser gesture.
+            // Capture can already be gone after a browser gesture.
           }
           this.pointerCaptured = false;
         }
@@ -162,30 +192,35 @@ export class InputManager {
     return this.keysPressed.has(code);
   }
 
-  clearPressed() {
-    this.keysPressed.clear();
-    this.keysReleased.clear();
-    this.mouse.clicked = false;
-    this.mouse.rightClicked = false;
-    this.mouse.wheel = 0;
+  action(name) {
+    const codes = BINDINGS[name] || [];
+    return codes.some((code) => this.keysDown.has(code));
   }
 
-  get forward() { return this.isDown('KeyW') || this.isDown('ArrowUp'); }
-  get backward() { return this.isDown('KeyS') || this.isDown('ArrowDown'); }
-  get left() { return this.isDown('KeyA') || this.isDown('ArrowLeft'); }
-  get right() { return this.isDown('KeyD') || this.isDown('ArrowRight'); }
-  get sprint() { return this.isDown('ShiftLeft') || this.isDown('ShiftRight'); }
-  get handbrake() { return this.isDown('Space'); }
-  get roll() { return this.wasPressed('Space'); }
-  get enterVehicle() { return this.wasPressed('KeyE') || this.wasPressed('KeyF'); }
-  get interact() { return this.wasPressed('KeyE'); }
-  get reload() { return this.wasPressed('KeyR'); }
-  get pause() { return this.wasPressed('Escape') || this.wasPressed('KeyP'); }
-  get confirm() { return this.wasPressed('Enter') || this.wasPressed('Space'); }
-  get mute() { return this.wasPressed('KeyM'); }
-  get radio() { return this.wasPressed('KeyQ'); }
-  get horn() { return this.wasPressed('KeyH'); }
-  get cameraZoom() { return this.wasPressed('KeyZ'); }
+  actionPressed(name) {
+    const codes = BINDINGS[name] || [];
+    return codes.some((code) => this.keysPressed.has(code));
+  }
+
+  get forward() { return this.action('forward'); }
+  get backward() { return this.action('backward'); }
+  get left() { return this.action('left'); }
+  get right() { return this.action('right'); }
+  get sprint() { return this.action('sprint'); }
+  get handbrake() { return this.action('handbrake'); }
+  get roll() { return this.actionPressed('handbrake'); }
+  get enterVehicle() { return this.actionPressed('enter'); }
+  get interact() { return this.actionPressed('interact'); }
+  get reload() { return this.actionPressed('reload'); }
+  get pause() { return this.actionPressed('pause'); }
+  get confirm() { return this.actionPressed('confirm'); }
+  get mute() { return this.actionPressed('mute'); }
+  get radio() { return this.actionPressed('radio'); }
+  get horn() { return this.actionPressed('horn'); }
+  get grenade() { return this.actionPressed('grenade'); }
+  get mapToggle() { return this.actionPressed('map'); }
+  get cameraZoom() { return this.actionPressed('camera'); }
+  get help() { return this.actionPressed('help'); }
 
   get weaponSlot() {
     for (let i = 1; i <= 5; i += 1) {
@@ -196,6 +231,14 @@ export class InputManager {
 
   get cycleWeapon() {
     return Math.sign(this.mouse.wheel);
+  }
+
+  clearPressed() {
+    this.keysPressed.clear();
+    this.keysReleased.clear();
+    this.mouse.clicked = false;
+    this.mouse.rightClicked = false;
+    this.mouse.wheel = 0;
   }
 
   endFrame() {

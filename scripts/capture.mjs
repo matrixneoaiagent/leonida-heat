@@ -21,6 +21,7 @@ const outDir = process.env.SHOT_DIR || join(root, 'screenshots');
 const base = process.env.GAME_URL || 'http://127.0.0.1:8080';
 const seed = process.env.SHOT_SEED || '2026';
 const maxBytes = 262144;
+const minBytes = 12000;
 
 const scenes = [
   ['1-chase.jpg', 'chase'],
@@ -31,7 +32,7 @@ const scenes = [
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || '/home/kozak/.local/bin/chromium',
-  args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+  args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--force-device-scale-factor=1'],
 });
 
 mkdirSync(outDir, { recursive: true });
@@ -42,6 +43,11 @@ for (const name of readdirSync(outDir)) {
 const page = await browser.newPage({
   viewport: { width: 1280, height: 720 },
   deviceScaleFactor: 1,
+});
+// Each capture starts from a clean browser profile: no stale save peeking
+// through the title screen, and no save written by a staged run.
+await page.addInitScript(() => {
+  try { localStorage.clear(); } catch { /* storage can be blocked */ }
 });
 const errors = [];
 page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
@@ -57,20 +63,23 @@ const results = [];
 for (const [file, scene] of scenes) {
   const started = Date.now();
   await page.goto(`${base}/?shot=${scene}&seed=${seed}`, { waitUntil: 'load' });
-  await page.waitForFunction(() => !!(window.__game && window.__game.shotReady), { timeout: 30000 });
-  await page.waitForTimeout(500);
-  const size = await page.evaluate(() => ({
+  await page.waitForFunction(() => !!(window.__game && window.__game.shotReady), { timeout: 45000 });
+  // Let the render loop draw the frozen frame and the font raster settle.
+  await page.waitForTimeout(700);
+  const info = await page.evaluate(() => ({
     width: document.getElementById('gameCanvas')?.width,
     height: document.getElementById('gameCanvas')?.height,
+    state: window.__game?.state,
+    snapshot: window.leonidaHeat?.snapshot?.(),
   }));
-  if (size.width !== 1280 || size.height !== 720) throw new Error(`canvas is ${size.width}x${size.height}, expected 1280x720`);
+  if (info.width !== 1280 || info.height !== 720) throw new Error(`canvas is ${info.width}x${info.height}, expected 1280x720`);
   const target = join(outDir, file);
   await page.screenshot({ type: 'jpeg', quality: 82, path: target });
   const bytes = statSync(target).size;
   results.push({ file, scene, bytes, ms: Date.now() - started });
-  console.log(`${file.padEnd(14)} ${scene.padEnd(8)} ${(bytes / 1024).toFixed(1)} KiB  ${Date.now() - started}ms`);
+  console.log(`${file.padEnd(14)} ${scene.padEnd(8)} ${(bytes / 1024).toFixed(1)} KiB  ${Date.now() - started}ms  ${info.state}`);
   if (bytes >= maxBytes) throw new Error(`${file} is over the 256 KiB limit`);
-  if (bytes < 12000) throw new Error(`${file} looks empty (${bytes} bytes)`);
+  if (bytes < minBytes) throw new Error(`${file} looks empty (${bytes} bytes)`);
 }
 
 await browser.close();

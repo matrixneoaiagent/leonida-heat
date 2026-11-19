@@ -1,4 +1,4 @@
-# Local build and editor output
+# Local build, capture and editor output
 out/
 dist/
 build/
@@ -11,6 +11,15 @@ node_modules/
 .shots/
 shot-*.jpg
 *-check-*.jpg
+*-dev-*.jpg
+capture-*.jpg
+
+# Browser and test scratch directories
+playwright-report/
+test-results/
+.blob/
+*.webm
+*.zip
 
 # OS and editor noise
 .DS_Store
@@ -22,10 +31,17 @@ desktop.ini
 *~
 *.log
 npm-debug.log*
+yarn-error.log
 .env
 .env.*
+!.env.example
 
 # Coverage and profiling
 coverage/
 *.cpuprofile
 *.heapprofile
+*.heapsnapshot
+
+# Agent and session stores are never part of the game
+.agent/
+.sessions/

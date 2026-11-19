@@ -1,16 +1,19 @@
-/* Leonida Heat - the page shell.
-   The game is a fixed 1280x720 canvas, letterboxed by main.js. Everything
-   inside the frame (city, HUD, menus, art) is Canvas 2D; the shell only
-   handles layout, the loading state, focus and errors. */
+/* Leonida Heat v3 - the page shell.
+   The game is a fixed 1280 x 720 canvas, letterboxed by main.js inside a
+   brushed arcade cabinet. Everything inside the screen (city, HUD, menus,
+   art) is Canvas 2D; this file only handles the room around it, the loading
+   state, focus and errors. */
 
 :root {
-  --ink: #0b0a10;
-  --ink-soft: #15121c;
+  --ink: #08070d;
+  --ink-soft: #12101a;
+  --panel: #1a1621;
   --gold: #ffd166;
   --pink: #ff7f9e;
   --cyan: #5ce1e6;
+  --mint: #8fe3a3;
   --paper: #f6efe2;
-  --bar: #1c1722;
+  --line: rgba(255, 218, 168, 0.18);
 }
 
 *,
@@ -39,9 +42,22 @@ body {
   align-items: center;
   justify-content: center;
   background:
-    radial-gradient(1200px 700px at 72% 8%, rgba(255, 127, 158, 0.16), transparent 65%),
-    radial-gradient(900px 620px at 12% 92%, rgba(92, 225, 230, 0.11), transparent 60%),
-    linear-gradient(160deg, #14101c 0%, #0b0a10 58%, #08070c 100%);
+    radial-gradient(1100px 720px at 74% 6%, rgba(255, 127, 158, 0.14), transparent 64%),
+    radial-gradient(900px 620px at 10% 94%, rgba(92, 225, 230, 0.1), transparent 60%),
+    radial-gradient(700px 420px at 50% 50%, rgba(255, 180, 92, 0.05), transparent 70%),
+    linear-gradient(160deg, #17121f 0%, #0b0a10 56%, #07060b 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(circle at 50% 50%, black, transparent 78%);
 }
 
 #stage {
@@ -51,6 +67,61 @@ body {
   justify-content: center;
   width: 100%;
   height: 100%;
+  padding: 24px;
+}
+
+.cabinet {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  color: rgba(246, 239, 226, 0.36);
+  white-space: nowrap;
+}
+
+.cabinet-line {
+  display: block;
+  width: 34px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 209, 102, 0.65));
+}
+
+.cabinet-dot {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--pink);
+  box-shadow: 0 0 10px rgba(255, 127, 158, 0.8);
+}
+
+.screen {
+  position: relative;
+  display: inline-block;
+  padding: 7px;
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 209, 102, 0.14), rgba(255, 255, 255, 0.015) 32%, rgba(255, 127, 158, 0.08)),
+    #0f0c14;
+  box-shadow:
+    0 0 0 1px rgba(255, 226, 178, 0.08),
+    0 34px 110px rgba(0, 0, 0, 0.72),
+    0 0 160px rgba(255, 111, 145, 0.1);
+}
+
+.screen::after {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  pointer-events: none;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(255, 246, 230, 0.08);
 }
 
 #gameCanvas {
@@ -59,31 +130,30 @@ body {
   cursor: crosshair;
   outline: none;
   border-radius: 2px;
-  box-shadow:
-    0 0 0 1px rgba(255, 226, 178, 0.08),
-    0 30px 90px rgba(0, 0, 0, 0.58),
-    0 0 120px rgba(255, 111, 145, 0.08);
   touch-action: none;
+  box-shadow: 0 0 70px rgba(0, 0, 0, 0.55);
 }
 
 #gameCanvas:focus-visible {
   outline: 2px solid rgba(255, 209, 102, 0.72);
-  outline-offset: 4px;
+  outline-offset: 6px;
 }
 
 /* ---------------------------------------------------------------- loading */
 #loading {
   position: absolute;
-  inset: 0;
+  inset: 7px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 22px;
+  border-radius: 2px;
   background:
-    radial-gradient(800px 500px at 50% 48%, rgba(255, 127, 158, 0.09), transparent 68%),
+    radial-gradient(820px 520px at 50% 48%, rgba(255, 127, 158, 0.1), transparent 68%),
+    radial-gradient(620px 400px at 28% 76%, rgba(92, 225, 230, 0.06), transparent 70%),
     #0b0a10;
   z-index: 8;
-  transition: opacity 320ms ease, visibility 320ms ease;
+  transition: opacity 340ms ease, visibility 340ms ease;
   pointer-events: none;
 }
 
@@ -93,19 +163,19 @@ body {
 }
 
 .loading-mark {
-  width: 54px;
-  height: 54px;
+  width: 58px;
+  height: 58px;
   border-radius: 50%;
-  border: 3px solid rgba(255, 209, 102, 0.18);
+  border: 3px solid rgba(255, 209, 102, 0.16);
   border-top-color: var(--gold);
   border-right-color: var(--pink);
   animation: heat-spin 900ms linear infinite;
-  box-shadow: 0 0 34px rgba(255, 127, 158, 0.28);
+  box-shadow: 0 0 38px rgba(255, 127, 158, 0.3);
 }
 
 .loading-copy {
   display: grid;
-  gap: 5px;
+  gap: 6px;
 }
 
 .loading-copy strong {
@@ -113,12 +183,13 @@ body {
   font-weight: 900;
   letter-spacing: 5px;
   color: #ffe6b5;
+  text-shadow: 0 0 22px rgba(255, 160, 120, 0.28);
 }
 
 .loading-copy span {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 1.6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.8px;
   color: rgba(246, 239, 226, 0.55);
   text-transform: uppercase;
 }
@@ -131,18 +202,18 @@ body {
 #errorBanner {
   position: absolute;
   left: 50%;
-  bottom: 28px;
+  bottom: 34px;
   transform: translateX(-50%);
-  max-width: min(760px, 90vw);
+  max-width: min(760px, 88%);
   padding: 14px 22px;
   border-radius: 9px;
   border: 1px solid rgba(255, 93, 108, 0.65);
-  background: rgba(38, 12, 18, 0.96);
+  background: rgba(38, 12, 18, 0.97);
   color: #ffd7d7;
   font-size: 14px;
   line-height: 1.45;
   z-index: 12;
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
 }
 
 #errorBanner[hidden] {
@@ -214,10 +285,23 @@ body.no-canvas #fallback {
   }
 }
 
-/* A phone can display the game, but the controls are desktop-first. */
-@media (max-width: 720px) {
-  #gameCanvas {
+@media (max-width: 760px) {
+  #stage {
+    padding: 0;
+  }
+  .screen {
+    padding: 0;
+    border-radius: 0;
     box-shadow: none;
+    background: #0b0a10;
+  }
+  #loading {
+    inset: 0;
+  }
+  .cabinet {
+    display: none;
+  }
+  #gameCanvas {
     border-radius: 0;
   }
   .loading-copy strong {

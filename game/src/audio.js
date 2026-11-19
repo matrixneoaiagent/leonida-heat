@@ -1,7 +1,8 @@
-// Leonida Heat - procedural sound.
-// Everything is synthesized at runtime with Web Audio: weapon reports,
-// impacts, engines, tires, sirens, rain and an adaptive radio bed with three
-// original stations. No samples, no network, no external libraries.
+// Leonida Heat v3 - procedural sound.
+// Everything is synthesized with Web Audio at runtime: layered engine voices,
+// wet tyres, sirens, rain and wind beds, grenade pins, weapon reports,
+// explosions, impacts and an adaptive four-station radio with tension
+// layers. No samples, no files, no network.
 
 import { RADIO_STATIONS } from './config.js';
 
@@ -11,18 +12,23 @@ export class SoundEngine {
   constructor() {
     this.ctx = null;
     this.master = null;
+    this.compressor = null;
     this.sfx = null;
     this.radio = null;
+    this.ambience = null;
     this.rainGain = null;
+    this.windGain = null;
+    this.delay = null;
     this.initialized = false;
     this.muted = false;
-    this.volume = 0.72;
+    this.volume = 0.74;
 
     this.engineOsc = null;
     this.engineSub = null;
     this.engineFilter = null;
     this.engineGain = null;
     this.engineRunning = false;
+    this.engineNote = 1;
 
     this.sirenOsc = null;
     this.sirenLfo = null;
@@ -42,7 +48,9 @@ export class SoundEngine {
     this.started = false;
     this.musicTension = 0;
     this.rainLevel = 0;
+    this.windLevel = 0.2;
     this.lastSirenStar = 1;
+    this.lastGunAt = 0;
   }
 
   stations() {
@@ -62,9 +70,17 @@ export class SoundEngine {
       const Ctx = typeof window !== 'undefined' ? (window.AudioContext || window.webkitAudioContext) : null;
       if (!Ctx) return;
       this.ctx = new Ctx();
+      this.compressor = this.ctx.createDynamicsCompressor();
+      this.compressor.threshold.value = -18;
+      this.compressor.knee.value = 24;
+      this.compressor.ratio.value = 5;
+      this.compressor.attack.value = 0.006;
+      this.compressor.release.value = 0.24;
+
       this.master = this.ctx.createGain();
       this.master.gain.value = this.muted ? 0 : this.volume;
-      this.master.connect(this.ctx.destination);
+      this.master.connect(this.compressor);
+      this.compressor.connect(this.ctx.destination);
 
       this.sfx = this.ctx.createGain();
       this.sfx.gain.value = 1;
@@ -74,11 +90,17 @@ export class SoundEngine {
       this.radio.gain.value = 0.55;
       this.radio.connect(this.master);
 
-      this.noiseBuffer = this.makeNoise(1.2);
+      this.ambience = this.ctx.createGain();
+      this.ambience.gain.value = 0.8;
+      this.ambience.connect(this.master);
+
+      this.noiseBuffer = this.makeNoise(1.4);
+      this.setupDelay();
       this.setupEngine();
       this.setupSiren();
       this.setupTire();
       this.setupRain();
+      this.setupWind();
       this.initialized = true;
       this.started = true;
       this.nextNoteTime = this.ctx.currentTime + 0.08;
@@ -120,6 +142,21 @@ export class SoundEngine {
     return buffer;
   }
 
+  setupDelay() {
+    if (!this.ctx) return;
+    this.delay = this.ctx.createDelay(0.5);
+    this.delay.delayTime.value = 0.24;
+    const feedback = this.ctx.createGain();
+    feedback.gain.value = 0.18;
+    const wet = this.ctx.createGain();
+    wet.gain.value = 0.16;
+    this.radio.connect(this.delay);
+    this.delay.connect(feedback);
+    feedback.connect(this.delay);
+    this.delay.connect(wet);
+    wet.connect(this.master);
+  }
+
   // -------------------------------------------------------------
   // Continuous voices
   // -------------------------------------------------------------
@@ -151,7 +188,7 @@ export class SoundEngine {
     this.engineNote = note;
     const t = this.ctx.currentTime;
     this.engineGain.gain.cancelScheduledValues(t);
-    this.engineGain.gain.setTargetAtTime(0.075, t, 0.06);
+    this.engineGain.gain.setTargetAtTime(0.08, t, 0.06);
     this.engineOsc.frequency.setTargetAtTime(54 * note, t, 0.1);
     this.engineSub.frequency.setTargetAtTime(27 * note, t, 0.1);
   }
@@ -163,16 +200,17 @@ export class SoundEngine {
     this.engineGain.gain.setTargetAtTime(0.0001, t, 0.08);
   }
 
-  updateEngine(speedRatio, accelerating, braking) {
+  updateEngine(speedRatio, accelerating, braking, gear = 1) {
     if (!this.ctx || !this.engineGain || !this.engineRunning) return;
     const ratio = clamp(speedRatio, 0, 1);
     const t = this.ctx.currentTime;
     const note = this.engineNote || 1;
-    const target = (40 + ratio * 86 + (accelerating ? 12 : 0) - (braking ? 8 : 0)) * note;
+    const gearLift = 1 + (gear - 1) * 0.08;
+    const target = (40 + ratio * 86 + (accelerating ? 12 : 0) - (braking ? 8 : 0)) * note * gearLift;
     this.engineOsc.frequency.setTargetAtTime(target, t, 0.08);
     this.engineSub.frequency.setTargetAtTime(target * 0.5, t, 0.08);
     this.engineFilter.frequency.setTargetAtTime(220 + ratio * 900, t, 0.1);
-    this.engineGain.gain.setTargetAtTime(0.05 + ratio * 0.06, t, 0.1);
+    this.engineGain.gain.setTargetAtTime(0.05 + ratio * 0.065, t, 0.1);
   }
 
   setupSiren() {
@@ -199,7 +237,7 @@ export class SoundEngine {
     this.sirenActive = !!active;
     if (!this.ctx || !this.sirenGain || !this.sirenOsc) return;
     const t = this.ctx.currentTime;
-    const level = active ? clamp(0.018 + stars * 0.011, 0.02, 0.085) : 0.0001;
+    const level = active ? clamp(0.016 + stars * 0.011, 0.02, 0.082) : 0.0001;
     this.sirenGain.gain.setTargetAtTime(level, t, 0.3);
     this.sirenOsc.frequency.setTargetAtTime(440 + stars * 42, t, 0.3);
     if (active) this.lastSirenStar = stars;
@@ -241,14 +279,38 @@ export class SoundEngine {
     this.rainGain.gain.value = 0;
     source.connect(filter);
     filter.connect(this.rainGain);
-    this.rainGain.connect(this.sfx);
+    this.rainGain.connect(this.ambience);
+    source.start();
+  }
+
+  setupWind() {
+    if (!this.ctx) return;
+    const source = this.ctx.createBufferSource();
+    source.buffer = this.noiseBuffer;
+    source.loop = true;
+    source.playbackRate.value = 0.6;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 420;
+    filter.Q.value = 0.7;
+    this.windGain = this.ctx.createGain();
+    this.windGain.gain.value = 0.015;
+    source.connect(filter);
+    filter.connect(this.windGain);
+    this.windGain.connect(this.ambience);
     source.start();
   }
 
   setRain(intensity) {
     this.rainLevel = intensity;
     if (!this.ctx || !this.rainGain) return;
-    this.rainGain.gain.setTargetAtTime(clamp(intensity, 0, 1) * 0.075, this.ctx.currentTime, 0.6);
+    this.rainGain.gain.setTargetAtTime(clamp(intensity, 0, 1) * 0.085, this.ctx.currentTime, 0.6);
+  }
+
+  setWind(intensity) {
+    this.windLevel = clamp(intensity, 0, 1);
+    if (!this.ctx || !this.windGain) return;
+    this.windGain.gain.setTargetAtTime(0.006 + this.windLevel * 0.028, this.ctx.currentTime, 0.9);
   }
 
   setMusicIntensity(value) {
@@ -315,19 +377,36 @@ export class SoundEngine {
     this.noiseBurst(dur, vol * v, 'bandpass', hi, 0.8);
     this.tone(low, dur * 1.2, 0.16 * v, 'square', low * 0.4);
     this.tone(low * 2.2, dur * 0.5, 0.06 * v, 'sawtooth', low * 0.6);
+    this.lastGunAt = performance.now();
   }
 
   playExplosion() {
     if (!this.ctx) return;
-    this.noiseBurst(0.9, 0.88, 'lowpass', 700, 1);
-    this.tone(62, 0.9, 0.32, 'sine', 24);
-    this.tone(95, 0.5, 0.18, 'sawtooth', 30);
-    this.noiseBurst(0.25, 0.45, 'highpass', 2200, 0.6);
+    this.noiseBurst(0.95, 0.92, 'lowpass', 700, 1);
+    this.tone(62, 0.95, 0.36, 'sine', 24);
+    this.tone(95, 0.55, 0.2, 'sawtooth', 30);
+    this.noiseBurst(0.3, 0.5, 'highpass', 2200, 0.6);
+    this.tone(38, 1.4, 0.18, 'sine', 18);
+  }
+
+  playGrenadePin() {
+    this.noiseBurst(0.05, 0.12, 'highpass', 3600, 1);
+    this.tone(880, 0.06, 0.05, 'square', 540);
+    setTimeout(() => this.tone(660, 0.05, 0.04, 'square', 420), 90);
+  }
+
+  playGrenadeBounce() {
+    this.noiseBurst(0.05, 0.09, 'bandpass', 1400, 2);
+    this.tone(220, 0.07, 0.04, 'triangle', 130);
   }
 
   playPunch() {
     this.tone(90, 0.11, 0.2, 'sine', 45);
     this.noiseBurst(0.07, 0.18, 'lowpass', 600, 1);
+  }
+
+  playMeleeWhoosh() {
+    this.noiseBurst(0.09, 0.06, 'bandpass', 900, 1.4);
   }
 
   playReload() {
@@ -351,6 +430,11 @@ export class SoundEngine {
     setTimeout(() => this.tone(990, 0.14, 0.055, 'triangle', 1320), 80);
   }
 
+  playCollectible() {
+    [784, 988, 1318, 1568].forEach((f, i) => this.tone(f, 0.24, 0.05, 'sine', f * 1.01, i * 0.08));
+    this.tone(392, 0.4, 0.04, 'triangle', 392);
+  }
+
   playMissionPass() {
     const chords = [392, 493.9, 587.3, 784];
     chords.forEach((f, i) => this.tone(f, 0.55, 0.07, 'triangle', f, i * 0.11));
@@ -362,6 +446,11 @@ export class SoundEngine {
   playMissionFail() {
     [392, 349.2, 293.7, 220].forEach((f, i) => this.tone(f, 0.42, 0.075, 'sawtooth', f * 0.84, i * 0.2));
     this.tone(110, 1.1, 0.1, 'sine', 55, 0.5);
+  }
+
+  playStunt() {
+    [523, 659, 784, 1046].forEach((f, i) => this.tone(f, 0.18, 0.055, 'square', f * 1.02, i * 0.06));
+    this.noiseBurst(0.4, 0.05, 'bandpass', 1200, 1.2);
   }
 
   playHorn(volume = 1) {
@@ -398,6 +487,20 @@ export class SoundEngine {
     setTimeout(() => this.tone(420, 0.08, 0.04, 'square', 660), 520);
   }
 
+  playIgnite() {
+    this.noiseBurst(0.5, 0.16, 'lowpass', 900, 0.7);
+    this.tone(80, 0.6, 0.08, 'sawtooth', 40);
+  }
+
+  playGarage() {
+    this.noiseBurst(0.22, 0.12, 'bandpass', 900, 2);
+    this.tone(120, 0.25, 0.07, 'square', 70);
+    setTimeout(() => {
+      this.noiseBurst(0.12, 0.09, 'highpass', 2600, 1);
+      this.tone(560, 0.12, 0.05, 'triangle', 880);
+    }, 220);
+  }
+
   playSplash() {
     this.noiseBurst(0.35, 0.09, 'lowpass', 1100, 0.8);
     this.tone(220, 0.2, 0.03, 'sine', 120);
@@ -410,6 +513,16 @@ export class SoundEngine {
   playThunder() {
     this.noiseBurst(1.4, 0.5, 'lowpass', 500, 0.7);
     this.tone(48, 1.3, 0.18, 'sine', 22);
+  }
+
+  playSirenChirp(stars = 1) {
+    this.tone(520 + stars * 40, 0.18, 0.05, 'triangle', 760 + stars * 40);
+    this.tone(600 + stars * 30, 0.16, 0.035, 'square', 460, 0.2);
+  }
+
+  playDoor() {
+    this.noiseBurst(0.09, 0.08, 'bandpass', 900, 2);
+    this.tone(120, 0.12, 0.05, 'square', 70);
   }
 
   // -------------------------------------------------------------
@@ -426,12 +539,12 @@ export class SoundEngine {
     if (!this.ctx || !this.radio) return;
     const t = this.ctx.currentTime;
     this.radio.gain.cancelScheduledValues(t);
-    this.radio.gain.setTargetAtTime(station.id === 'off' ? 0.0001 : 0.52, t, 0.08);
+    this.radio.gain.setTargetAtTime(station.id === 'off' ? 0.0001 : 0.5, t, 0.08);
     this.nextNoteTime = t + 0.12;
     this.step = 0;
     if (station.id !== 'off') {
-      this.scheduleNoise(t, 0.09, 0.025, 3800);
-      this.scheduleVoice('triangle', 660, t, 0.05, 0.018, 1200);
+      this.scheduleNoise(t, 0.09, 0.022, 3800);
+      this.scheduleVoice('triangle', 660, t, 0.05, 0.016, 1200);
     }
   }
 
@@ -460,6 +573,7 @@ export class SoundEngine {
       }
       if (this.musicTension >= 1 && step % 8 === 2) this.scheduleVoice('sawtooth', b * 2, t, 0.1, 0.022, 1400);
       if (this.musicTension >= 2 && step % 8 === 6) this.scheduleKick(t, 0.12);
+      if (this.musicTension >= 3 && step % 4 === 0) this.scheduleNoise(t, 0.06, 0.03, 5200);
     } else if (station.id === 'coral') {
       const subs = [55, 55, 61.7, 49];
       if (step % 16 === 0 || step % 16 === 7) {
@@ -472,6 +586,7 @@ export class SoundEngine {
       if (step % 32 === 16) this.scheduleVoice('sawtooth', 329.6, t, 0.4, 0.022, 600);
       if (this.musicTension >= 1 && step % 4 === 2) this.scheduleVoice('square', 220, t, 0.08, 0.014, 1800);
       if (this.musicTension >= 2 && step % 16 === 8) this.scheduleKick(t, 0.15);
+      if (this.musicTension >= 3 && step % 8 === 6) this.scheduleNoise(t, 0.08, 0.05, 900);
     } else if (station.id === 'tidepool') {
       const chords = [
         [293.7, 370, 440, 554.4],
@@ -487,6 +602,8 @@ export class SoundEngine {
       if (step % 8 === 2) this.scheduleNoise(t, 0.06, 0.02, 4800);
       if (this.musicTension >= 1 && step % 8 === 6) this.scheduleVoice('triangle', 587.3, t, 0.3, 0.018, 2200);
       if (this.musicTension >= 2 && step % 16 === 0) this.scheduleNoise(t, 0.35, 0.035, 900);
+    } else if (station.id === 'off') {
+      // Silence is a station.
     }
     void stepDur;
   }
@@ -561,17 +678,6 @@ export class SoundEngine {
     osc.stop(start + duration + 0.02);
   }
 
-  playSirenChirp(stars = 1) {
-    if (!this.ctx) return;
-    this.tone(520 + stars * 40, 0.18, 0.05, 'triangle', 760 + stars * 40);
-    this.tone(600 + stars * 30, 0.16, 0.035, 'square', 460, 0.2);
-  }
-
-  playDoor() {
-    this.noiseBurst(0.09, 0.08, 'bandpass', 900, 2);
-    this.tone(120, 0.12, 0.05, 'square', 70);
-  }
-
   dispose() {
     if (this.radioTimer) clearInterval(this.radioTimer);
     this.radioTimer = null;
@@ -585,5 +691,4 @@ export class SoundEngine {
     this.ctx = null;
     this.initialized = false;
   }
-
 }

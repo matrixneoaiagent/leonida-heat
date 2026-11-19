@@ -1,14 +1,16 @@
-// Leonida Heat - violence, enemy crews and ballistic simulation.
+// Leonida Heat v3 - violence, crews and ballistic simulation.
 // Rounds are swept segments, so a fast rifle shot cannot tunnel through a
-// wall or a body. Enemies have archetypes, burst patterns, accuracy that
-// falls off with range and movement, and a cover reflex. The player's
-// shotgun fires a real pellet cone. Feedback is blood-free: hot hit flashes,
-// sparks, dust and shell casings.
+// wall or a body. Enemies run a small squad brain: hold a preferred range,
+// flank wide when the player is pinned, dive for real cover when hurt, and
+// suppress with bursts. The player has a three-hit melee combo and a real
+// grenade with an arc, bounce, fuse and blast radius. Feedback stays
+// blood-free: hot impact flashes, sparks, dust, glass and shell casings.
 
-import { WEAPON_CONFIG, ENEMY_ARCHETYPES } from './config.js';
+import { WEAPON_CONFIG, ENEMY_ARCHETYPES, GRENADE_CONFIG, PHYSICS_CONFIG } from './config.js';
 import { Pedestrian } from './entities.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const TAU = Math.PI * 2;
 
 function segmentHitsCircle(x1, y1, x2, y2, cx, cy, r) {
   const dx = x2 - x1;
@@ -48,7 +50,7 @@ export class Enemy {
     this.angle = 0;
     this.weapon = WEAPON_CONFIG[weaponType] || WEAPON_CONFIG.pistol;
     this.archetype = archetype;
-    this.health = isBoss ? 300 : archetype.health;
+    this.health = isBoss ? 330 : archetype.health;
     this.maxHealth = this.health;
     this.isBoss = isBoss;
     this.isDead = false;
@@ -70,13 +72,18 @@ export class Enemy {
     this.burstTimer = 0;
     this.strafeDir = Math.random() > 0.5 ? 1 : -1;
     this.strafeTimer = 0.8 + Math.random() * 1.4;
+    this.flankSide = Math.random() > 0.5 ? 1 : -1;
+    this.flankTimer = 1.4 + Math.random() * 1.4;
+    this.suppressed = 0;
     this.crouched = false;
     this.perception = 0;
     this.name = archetype.name;
     this.isEnemy = true;
     this.moving = false;
-    this.walkPhase = Math.random() * Math.PI * 2;
+    this.walkPhase = Math.random() * TAU;
     this.facing = 0;
+    this.grenadeTimer = isBoss ? 4.5 : (archetype.grenade ? 6 + Math.random() * 4 : Infinity);
+    this.squadRole = 'press';
   }
 
   takeDamage(amount, particles, audio) {
@@ -84,6 +91,7 @@ export class Enemy {
     this.health -= amount;
     this.hitFlash = 1;
     this.perception = 1;
+    this.suppressed = Math.min(1, this.suppressed + 0.25);
     if (particles) particles.spawnHit(this.x, this.y, 4);
     if (this.health <= 0) {
       this.isDead = true;
@@ -96,9 +104,9 @@ export class Enemy {
         particles.spawnCash(this.x, this.y, this.isBoss ? 700 : 55 + Math.floor(Math.random() * 70));
       }
       if (audio) audio.playBodyFall();
-    } else if (this.health < this.maxHealth * 0.55 && this.state !== 'cover') {
+    } else if (this.health < this.maxHealth * 0.52 && this.state !== 'cover') {
       this.state = 'cover';
-      this.coverTimer = 1.2 + Math.random() * 1.2;
+      this.coverTimer = 1.3 + Math.random() * 1.2;
       this.coverPoint = null;
     }
   }
@@ -118,8 +126,8 @@ export class Enemy {
         if (city.pointBlocked(c.x, c.y, 14)) continue;
         const d = Math.hypot(c.x - this.x, c.y - this.y);
         if (d > 300) continue;
-        const hiding = city.hasLineOfSight(c.x, c.y, player.x, player.y, 500) ? -80 : 120;
-        const score = hiding - d * 0.25;
+        const hiding = city.hasLineOfSight(c.x, c.y, player.x, player.y, 500) ? -80 : 130;
+        const score = hiding - d * 0.28;
         if (score > bestScore) {
           bestScore = score;
           best = c;
@@ -134,7 +142,7 @@ export class Enemy {
     const dist = Math.hypot(player.x - this.x, player.y - this.y);
     const moving = Math.hypot(player.vx || 0, player.vy || 0) > 120 ? 0.16 : 0;
     const falloff = clamp(1 - dist / (w.range * 1.4), 0.25, 1);
-    const spreadBase = (1 - this.accuracy) * 0.16 + this.aimJitter + moving;
+    const spreadBase = (1 - this.accuracy) * 0.16 + this.aimJitter + moving + this.suppressed * 0.1;
     const pellets = w.pellets || 1;
     for (let i = 0; i < pellets; i += 1) {
       const spread = (Math.random() - 0.5) * spreadBase * 2;
@@ -158,6 +166,8 @@ export class Enemy {
     this.stateTimer -= dt;
     this.perception = Math.max(0, this.perception - dt * 0.6);
     this.strafeTimer -= dt;
+    this.flankTimer -= dt;
+    this.suppressed = Math.max(0, this.suppressed - dt * 0.55);
 
     const dx = player.x - this.x;
     const dy = player.y - this.y;
@@ -168,6 +178,7 @@ export class Enemy {
       this.perception = 1;
     }
     this.angle = Math.atan2(dy, dx);
+    this.facing = this.angle > -Math.PI / 4 && this.angle <= Math.PI / 4 ? 3 : this.angle > Math.PI / 4 && this.angle <= (Math.PI * 3) / 4 ? 0 : this.angle > -(Math.PI * 3) / 4 && this.angle <= -Math.PI / 4 ? 2 : 1;
 
     let targetX = player.x;
     let targetY = player.y;
@@ -191,9 +202,20 @@ export class Enemy {
       this.state = 'combat';
       if (los) {
         const preferred = this.archetype.preferredRange;
-        if (dist > preferred + 70) move = 1;
-        else if (dist < preferred - 80) move = -0.8;
-        else {
+        if (dist > preferred + 70) {
+          move = 1;
+          if (this.flankTimer <= 0 && dist > 210 && (this.archetype.flank || 0) > 0.6) {
+            this.flankTimer = 2.4 + Math.random() * 2;
+            this.flankSide *= -1;
+            this.state = 'flank';
+          }
+          if (this.state === 'flank') {
+            targetX = player.x + Math.cos(this.angle + Math.PI / 2) * 150 * this.flankSide;
+            targetY = player.y + Math.sin(this.angle + Math.PI / 2) * 150 * this.flankSide;
+          }
+        } else if (dist < preferred - 80) {
+          move = -0.8;
+        } else {
           move = 0.2;
           if (this.strafeTimer <= 0) {
             this.strafeTimer = 0.9 + Math.random() * 1.6;
@@ -230,7 +252,6 @@ export class Enemy {
       move = 0.32;
     }
 
-    // Fire queued burst rounds.
     if (this.burstLeft > 0) {
       this.burstTimer -= dt;
       if (this.burstTimer <= 0 && los && dist < this.weapon.range) {
@@ -242,15 +263,26 @@ export class Enemy {
       }
     }
 
+    // Crowe and the heavier crews lob grenades when the player camps cover.
+    if (this.grenadeTimer !== Infinity && los && dist > 150 && dist < 430) {
+      this.grenadeTimer -= dt;
+      if (this.grenadeTimer <= 0) {
+        this.grenadeTimer = this.isBoss ? 5.5 + Math.random() * 3 : 8 + Math.random() * 5;
+        const aim = Math.atan2(player.y - this.y, player.x - this.x) + (Math.random() - 0.5) * 0.12;
+        combat.throwGrenade(this.x + Math.cos(aim) * 20, this.y + Math.sin(aim) * 20, aim, 'enemy', 0.92);
+        if (audio) audio.playGunshot?.('pistol', 0.2);
+      }
+    }
+
     if (move !== 0) {
       const mdx = targetX - this.x;
       const mdy = targetY - this.y;
       const md = Math.hypot(mdx, mdy) || 1;
-      this.vx = (mdx / md) * this.moveSpeed * move;
-      this.vy = (mdy / md) * this.moveSpeed * move;
+      const slowdown = this.crouched ? 0.35 : 1;
+      this.vx = (mdx / md) * this.moveSpeed * move * slowdown;
+      this.vy = (mdy / md) * this.moveSpeed * move * slowdown;
       this.moving = true;
-      this.walkPhase = (this.walkPhase + dt * 9) % (Math.PI * 2);
-      this.facing = Math.atan2(this.vy, this.vx) > -Math.PI / 4 && Math.atan2(this.vy, this.vx) <= Math.PI / 4 ? 3 : Math.atan2(this.vy, this.vx) > Math.PI / 4 && Math.atan2(this.vy, this.vx) <= (Math.PI * 3) / 4 ? 0 : Math.atan2(this.vy, this.vx) > -(Math.PI * 3) / 4 && Math.atan2(this.vy, this.vx) <= -Math.PI / 4 ? 2 : 1;
+      this.walkPhase = (this.walkPhase + dt * 9) % TAU;
     } else {
       this.vx *= Math.exp(-10 * dt);
       this.vy *= Math.exp(-10 * dt);
@@ -279,9 +311,11 @@ export class CombatManager {
     this.enemies = [];
     this.pedestrians = [];
     this.bullets = [];
+    this.grenades = [];
     this.populationTimer = 0;
     this.pedSpawnRng = Math.random;
     this.lastGunfireNotify = 0;
+    this.grenadeId = 1;
   }
 
   setPedestrianRng(rng) {
@@ -323,6 +357,60 @@ export class CombatManager {
     });
   }
 
+  throwPlayerGrenade(player, audio) {
+    if (player.grenades <= 0 || player.grenadeCooldown > 0) {
+      if (player.grenades <= 0 && audio) audio.playHorn?.(0.15);
+      return false;
+    }
+    player.grenades -= 1;
+    player.grenadeCooldown = GRENADE_CONFIG.cooldown;
+    const angle = player.vehicle ? player.vehicle.angle : player.angle;
+    this.throwGrenade(
+      player.x + Math.cos(angle) * 22,
+      player.y + Math.sin(angle) * 22,
+      angle,
+      'player',
+      1,
+    );
+    if (player.vehicle) {
+      player.vehicle.vx -= Math.cos(angle) * 12;
+      player.vehicle.vy -= Math.sin(angle) * 12;
+    }
+    return true;
+  }
+
+  throwGrenade(x, y, angle, owner = 'player', power = 1) {
+    const speed = GRENADE_CONFIG.throwSpeed * power;
+    this.grenades.push({
+      id: this.grenadeId++,
+      x, y, z: 10, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+      vz: 190 * power, fuse: GRENADE_CONFIG.fuse + Math.random() * 0.2,
+      owner, bounces: 0, spin: Math.random() * TAU, radius: GRENADE_CONFIG.radius,
+    });
+  }
+
+  detonateGrenade(g, particles, audio, game) {
+    particles.spawnExplosion(g.x, g.y, g.radius, GRENADE_CONFIG.damage);
+    if (audio) audio.playExplosion();
+    if (game) {
+      game.camera.shake = Math.max(game.camera.shake, 1.05);
+      game.notifyGunfire?.(g.x, g.y);
+    }
+    // A second, hotter core and a shock ring read as a real grenade rather
+    // than a re-used car explosion.
+    for (let i = 0; i < 14; i += 1) {
+      const a = Math.random() * TAU;
+      const s = 100 + Math.random() * 260;
+      particles.add({
+        type: 'explosion_fire', x: g.x, y: g.y,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        life: 1, decay: 1.2, size: 10 + Math.random() * 16,
+        color: Math.random() > 0.5 ? '#ff7a2a' : '#ffe48a',
+      });
+    }
+    if (g.owner === 'player' && game) game.onCrime?.('explosion', 2);
+  }
+
   handlePlayerAttack(player, input, police, particles, audio, game) {
     if (player.isReloading || player.isRolling || player.hotwire) return;
     if (player.fireCooldown > 0) return;
@@ -332,42 +420,49 @@ export class CombatManager {
     player.angle = aimAngle;
 
     if (w.id === 'fists') {
+      const combo = player.registerMelee();
+      const damage = w.comboDamage?.[combo - 1] ?? w.damage;
+      const knock = w.comboKnockback?.[combo - 1] ?? 90;
       if (audio) audio.playPunch();
-      const reach = w.range;
+      const reach = w.range + (combo === 3 ? 12 : 0);
       const px = player.x + Math.cos(player.angle) * reach;
       const py = player.y + Math.sin(player.angle) * reach;
       let hit = false;
+      const radius = combo === 3 ? 46 : 30;
       for (const ped of this.pedestrians) {
-        if (!ped.isDead && Math.hypot(px - ped.x, py - ped.y) < 28) {
-          ped.takeDamage(w.damage, particles, audio, player.angle);
+        if (!ped.isDead && Math.hypot(px - ped.x, py - ped.y) < radius) {
+          ped.takeDamage(damage, particles, audio, player.angle);
           game.onCrime('assault', 1);
           hit = true;
-          break;
-        }
-      }
-      if (!hit) {
-        for (const enemy of this.enemies) {
-          if (!enemy.isDead && Math.hypot(px - enemy.x, py - enemy.y) < 34) {
-            enemy.takeDamage(w.damage, particles, audio);
-            enemy.vx += Math.cos(player.angle) * 90;
-            enemy.vy += Math.sin(player.angle) * 90;
-            hit = true;
-            break;
+          if (combo === 3) {
+            ped.vx += Math.cos(player.angle) * knock;
+            ped.vy += Math.sin(player.angle) * knock;
           }
         }
       }
-      if (!hit) {
-        for (const cop of police.footCops || []) {
-          if (cop.isDead) continue;
-          if (Math.hypot(px - cop.x, py - cop.y) < 30) {
-            cop.takeDamage(w.damage, particles, audio);
-            game.onCrime('cop', 2);
-            break;
-          }
+      for (const enemy of this.enemies) {
+        if (!enemy.isDead && Math.hypot(px - enemy.x, py - enemy.y) < radius + 4) {
+          enemy.takeDamage(damage, particles, audio);
+          enemy.vx += Math.cos(player.angle) * knock;
+          enemy.vy += Math.sin(player.angle) * knock;
+          hit = true;
         }
       }
-      particles.spawnSparks(px, py, 2, 0.3);
-      game.camera.shake = Math.max(game.camera.shake, 0.12);
+      for (const cop of police.footCops || []) {
+        if (cop.isDead) continue;
+        if (Math.hypot(px - cop.x, py - cop.y) < radius) {
+          cop.takeDamage(damage, particles, audio);
+          game.onCrime('cop', 2);
+          hit = true;
+        }
+      }
+      if (hit) {
+        particles.spawnSparks(px, py, combo === 3 ? 10 : 3, combo === 3 ? 0.9 : 0.3);
+        particles.spawnHit(px, py, combo === 3 ? 8 : 3, player.angle);
+        game.camera.shake = Math.max(game.camera.shake, combo === 3 ? 0.42 : 0.12);
+      } else {
+        particles.spawnDust(px, py, 1, 4);
+      }
       return;
     }
 
@@ -379,9 +474,7 @@ export class CombatManager {
     mag.clip -= 1;
     const pellets = w.pellets || 1;
     for (let p = 0; p < pellets; p += 1) {
-      let spread;
-      if (pellets > 1) spread = (Math.random() - 0.5) * w.spread * 2;
-      else spread = (Math.random() - 0.5) * w.spread * 2;
+      const spread = (Math.random() - 0.5) * w.spread * 2;
       const a = player.angle + spread;
       const muzzleX = player.x + Math.cos(player.angle) * 26;
       const muzzleY = player.y + Math.sin(player.angle) * 26;
@@ -407,12 +500,11 @@ export class CombatManager {
       if (e.isDead && e.deathTimer > 30) this.enemies.splice(i, 1);
     }
 
-    // Pedestrian population.
     this.populationTimer -= dt;
     if (this.populationTimer <= 0 && !game.shotFrozen) {
       this.populationTimer = 1.5;
       const alive = this.pedestrians.filter((p) => !p.isDead).length;
-      if (alive < 46) {
+      if (alive < 48) {
         const p = this.city.sidewalkPoint(player.x, player.y, 860, this.pedSpawnRng);
         const lane = {
           road: p.road,
@@ -430,7 +522,6 @@ export class CombatManager {
 
     for (const p of this.pedestrians) p.update(dt, this.city, particles);
 
-    // A fast car scatters pedestrians.
     if (this.populationTimer > 1.45) {
       for (const v of game.allVehicles()) {
         const speed = Math.hypot(v.vx, v.vy);
@@ -448,6 +539,56 @@ export class CombatManager {
             particles.spawnFootstep(p.x, p.y);
           }
         }
+      }
+    }
+
+    // Grenades: arc, bounce, fuse, blast.
+    for (let i = this.grenades.length - 1; i >= 0; i -= 1) {
+      const g = this.grenades[i];
+      g.fuse -= dt;
+      g.spin += dt * 9;
+      g.vz -= 620 * dt;
+      g.z += g.vz * dt;
+      if (g.z < 3) {
+        g.z = 3;
+        if (g.vz < -40) {
+          g.vz = -g.vz * 0.36;
+          if (Math.abs(g.vz) < 30) g.vz = 0;
+        } else {
+          g.vz = 0;
+        }
+      }
+      const nx = g.x + g.vx * dt;
+      const ny = g.y + g.vy * dt;
+      const wall = this.city.collideCircle(nx, ny, 6);
+      if (wall) {
+        g.x += wall.x;
+        g.y += wall.y;
+        const len = Math.hypot(wall.x, wall.y) || 1;
+        const ux = wall.x / len;
+        const uy = wall.y / len;
+        const into = g.vx * ux + g.vy * uy;
+        if (into < 0) {
+          g.vx -= ux * into * 1.7;
+          g.vy -= uy * into * 1.7;
+        }
+        g.bounces += 1;
+        particles.spawnSparks(g.x, g.y, 4, 0.6);
+      } else {
+        g.x = nx;
+        g.y = ny;
+      }
+      g.vx *= Math.exp(-1.8 * dt);
+      g.vy *= Math.exp(-1.8 * dt);
+      if (Math.random() < 0.5) {
+        particles.add({
+          type: 'spark', x: g.x, y: g.y - g.z * 0.2, vx: 0, vy: 0,
+          life: 0.16, decay: 4, size: 1.4, color: '#ffcf5c',
+        });
+      }
+      if (g.fuse <= 0) {
+        this.detonateGrenade(g, particles, audio, game);
+        this.grenades.splice(i, 1);
       }
     }
 
@@ -549,7 +690,6 @@ export class CombatManager {
       if (consumed) this.bullets.splice(i, 1);
     }
 
-    // Running people over.
     for (const v of game.allVehicles()) {
       const speed = Math.hypot(v.vx, v.vy);
       if (speed < 150 || v.isDestroyed) continue;
@@ -567,7 +707,6 @@ export class CombatManager {
       }
     }
 
-    // Explosion shockwaves.
     for (const boom of particles.drainExplosions()) {
       game.camera.shake = Math.max(game.camera.shake, 0.9);
       for (const e of this.enemies) {
@@ -576,14 +715,20 @@ export class CombatManager {
       for (const p of this.pedestrians) {
         if (!p.isDead && Math.hypot(p.x - boom.x, p.y - boom.y) < boom.radius) p.takeDamage(110, particles, audio);
       }
+      for (const cop of police.footCops || []) {
+        if (!cop.isDead && Math.hypot(cop.x - boom.x, cop.y - boom.y) < boom.radius) cop.takeDamage(boom.damage, particles, audio);
+      }
       if (Math.hypot(player.x - boom.x, player.y - boom.y) < boom.radius) {
         player.takeDamage(boom.damage * 0.8, particles, audio);
         game.onPlayerHurt();
       }
       for (const v of game.allVehicles()) {
         if (!v.isDestroyed && v !== player.vehicle && Math.hypot(v.x - boom.x, v.y - boom.y) < boom.radius) {
-          v.takeDamage(boom.damage * 1.3, particles, audio);
+          v.takeDamage(boom.damage * 1.35, particles, audio);
         }
+      }
+      if (player.vehicle && !player.vehicle.isDestroyed && Math.hypot(player.vehicle.x - boom.x, player.vehicle.y - boom.y) < boom.radius) {
+        player.vehicle.takeDamage(boom.damage * 1.1, particles, audio);
       }
     }
 
@@ -591,3 +736,5 @@ export class CombatManager {
     void traffic;
   }
 }
+
+export { PHYSICS_CONFIG };

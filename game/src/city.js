@@ -1,24 +1,30 @@
-// Leonida Heat - Costa Sol, generated.
-// A deterministic 3200 x 3200 coastal city: a ring highway, a downtown grid,
-// garden estates, industrial blocks, docks, a beach, a pier and a marina. The
-// generator also owns the collision hash, the road furniture tables and the
-// skid-mark decal list used by the renderer and every actor.
+// Leonida Heat v3 - Costa Sol, generated.
+// A deterministic 3200 x 3200 coastal city: a ring highway, six districts,
+// tower blocks, estates, market low-rises, container yards, a working beach,
+// three piers, a marina, alleys, parks, stunt ramps, garages and a dozen
+// hidden mixtapes. The generator also owns the spatial collision hash, road
+// furniture, skid marks and every spawn table used by the other systems.
 
-import { MAP_CONFIG, DISTRICTS, districtAt } from './config.js';
-import { mulberry32, pick, range, chance, hash2 } from './rng.js';
+import { MAP_CONFIG, DISTRICTS, districtAt, GARAGE_CONFIG } from './config.js';
+import { mulberry32, pick, range, rangeInt, chance, hash2 } from './rng.js';
 
 const BLOCK_GAP = 10;
 const SIDEWALK = 26;
 
-const X_CUTS = [0, 120, 400, 800, 1200, 1600, 2000, 2400];
-const Y_CUTS = [0, 120, 350, 700, 1050, 1400, 1800, 2200, 2600, 2950, 3090, 3200];
+const X_CUTS = [0, 120, 400, 800, 1080, 1200, 1600, 1800, 2000, 2320, 2400, 2480, 3200];
+const Y_CUTS = [0, 120, 350, 620, 700, 1050, 1400, 1800, 2140, 2200, 2600, 2950, 3080, 3200];
 
-const SHOP_SIGNS = ['CAFÉ BUENA', 'LIQUOR', 'LAUNDRY', 'TACOS', 'PAWN', 'SURF SHOP', 'DINER', 'BODEGA', 'TIDE BAR', 'NAILS', 'RECORDS', 'PHARMACY'];
-const TOWER_SIGNS = ['MERIDIAN', 'SOLARIS', 'PELICAN AIR', 'CORAL BANK', 'TIDEWATER', 'MIRAGE', 'VANTAGE', 'SUNSET CO', 'AZURE'];
+const SHOP_SIGNS = ['CAFÉ BUENA', 'LIQUOR', 'LAUNDRY', 'TACOS', 'PAWN', 'SURF SHOP', 'DINER', 'BODEGA', 'TIDE BAR', 'NAILS', 'RECORDS', 'PHARMACY', 'BAIT & ICE', 'CICADAS'];
+const TOWER_SIGNS = ['MERIDIAN', 'SOLARIS', 'PELICAN AIR', 'CORAL BANK', 'TIDEWATER', 'MIRAGE', 'VANTAGE', 'SUNSET CO', 'AZURE', 'RIDGELINE'];
 const ROOF_PROPS = ['ac', 'tank', 'vent', 'dish', 'solar', 'garden'];
+const CONTAINER_COLORS = ['#c94f43', '#3f7fa8', '#d99a35', '#4d8f68', '#8a5a9e', '#b9693f', '#4f8b9a'];
 
 function rectsOverlap(a, b, pad = 0) {
   return Math.abs(a.x - b.x) < (a.w + b.w) / 2 + pad && Math.abs(a.y - b.y) < (a.h + b.h) / 2 + pad;
+}
+
+function pointInRect(x, y, r) {
+  return Math.abs(x - r.x) < r.w / 2 && Math.abs(y - r.y) < r.h / 2;
 }
 
 export class CityWorld {
@@ -53,20 +59,26 @@ export class CityWorld {
     this.puddles = [];
     this.parkAreas = [];
     this.alleys = [];
+    this.ramps = [];
+    this.collectibleSpots = [];
+    this.garages = [];
+    this.stuntRoutes = [];
     this.marina = { x: 2812, y: 2320, r: 190, name: 'Quay Marina' };
     this.pois = [];
     this.spawnPoints = [];
+
     this.landmarks = {
-      diner: { x: 2560, y: 1110, name: 'The Pelican Grill', contact: 'Maya', icon: 'diner' },
-      valet: { x: 2560, y: 900, name: 'Coral Valet', contact: 'Maya', icon: 'car' },
+      diner: { x: 2560, y: 1080, name: 'The Pelican Grill', contact: 'Maya', icon: 'diner' },
+      valet: { x: 2560, y: 880, name: 'Coral Valet', contact: 'Maya', icon: 'car' },
       chopShop: { x: 350, y: 2450, name: 'Rustline Chop Shop', icon: 'wrench' },
-      plaza: { x: 1750, y: 1450, name: 'Vantage Plaza', icon: 'star' },
-      safehouse: { x: 1330, y: 1310, name: 'Sabal Safehouse', icon: 'home' },
+      garage: { x: 520, y: 2300, name: 'Rustline Garage', icon: 'wrench' },
+      plaza: { x: 1760, y: 1460, name: 'Vantage Plaza', icon: 'star' },
+      safehouse: { x: 1330, y: 1280, name: 'Sabal Safehouse', icon: 'home' },
       docks: { x: 2250, y: 2500, name: 'Pier 9 Warehouse', icon: 'crate' },
       compound: { x: 2560, y: 470, name: 'Crowe Estate', icon: 'crown' },
-      hospital: { x: 1350, y: 1750, name: 'Costa Sol General', icon: 'cross' },
+      hospital: { x: 1350, y: 1740, name: 'Costa Sol General', icon: 'cross' },
       policeStation: { x: 1650, y: 950, name: 'Costa Sol Police HQ', icon: 'shield' },
-      boardwalk: { x: 2620, y: 1800, name: 'Coral Boardwalk', icon: 'wave' },
+      boardwalk: { x: 2524, y: 1660, name: 'Coral Boardwalk', icon: 'wave' },
       marina: { x: 2812, y: 2320, name: 'Quay Marina', icon: 'anchor' },
       park: { x: 760, y: 560, name: 'Sabal Palms Park', icon: 'tree' },
     };
@@ -129,6 +141,9 @@ export class CityWorld {
     this.generateParking();
     this.generateBeachDetail();
     this.generatePuddles();
+    this.generateRamps();
+    this.generateCollectibles();
+    this.generateGarages();
     this.generatePois();
     this.buildSpatialGrid();
   }
@@ -138,20 +153,18 @@ export class CityWorld {
     this.beaches.push({ x: 2590, y: 1600, w: 260, h: 3200 });
     this.boardwalk = { x: 2494, y: 0, w: 58, h: 3200 };
     this.piers.push(
-      { x: 2840, y: 730, w: 300, h: 44, name: 'Pelican Pier', boats: false },
+      { x: 2840, y: 780, w: 300, h: 46, name: 'Pelican Pier', boats: false },
       { x: 2840, y: 1660, w: 340, h: 48, name: 'Coral Boardwalk Pier', boats: true },
-      { x: 2840, y: 2380, w: 270, h: 42, name: 'Drydock Pier', boats: false },
+      { x: 2840, y: 2380, w: 270, h: 44, name: 'Drydock Pier', boats: false },
       { x: 2812, y: 2320, w: 210, h: 26, name: 'Quay Marina Dock', boats: true },
       { x: 2812, y: 2200, w: 156, h: 20, name: 'Quay Marina Arm', boats: true },
     );
 
-    // Marina slips and little hulls, all decorative.
     for (let i = 0; i < 7; i += 1) {
       const x = 2818 + (i % 2) * 86;
       const y = 2100 + i * 44;
       this.props.push({ type: 'boat', x, y, angle: Math.PI / 2 + (i % 3) * 0.06, color: pick(this.rng, ['#f4f1e8', '#5ce1e6', '#ff7f9e', '#ffd166']) });
     }
-    // Lifeguard huts and beach furniture.
     for (let i = 0; i < 5; i += 1) {
       this.props.push({ type: 'lifeguard', x: 2652, y: 260 + i * 610, angle: 0 });
     }
@@ -164,9 +177,9 @@ export class CityWorld {
       { x1: 1200, y1: 0, x2: 1200, y2: 3200, width: 88, lanes: 4, name: 'Meridian Expressway', kind: 'arterial' },
       { x1: 0, y1: 2200, x2: 2700, y2: 2200, width: 84, lanes: 4, name: 'Drydock Parkway', kind: 'arterial' },
       { x1: 0, y1: 700, x2: 2400, y2: 700, width: 84, lanes: 4, name: 'Palmetto Way', kind: 'arterial' },
-      { x1: 120, y1: 120, x2: 120, y2: 3090, width: 70, lanes: 4, name: 'Bayshore Loop', kind: 'highway' },
+      { x1: 120, y1: 120, x2: 120, y2: 3080, width: 70, lanes: 4, name: 'Bayshore Loop', kind: 'highway' },
       { x1: 0, y1: 120, x2: 2400, y2: 120, width: 66, lanes: 4, name: 'North Ring', kind: 'highway' },
-      { x1: 0, y1: 3090, x2: 2400, y2: 3090, width: 70, lanes: 4, name: 'South Ring', kind: 'highway' },
+      { x1: 0, y1: 3080, x2: 2400, y2: 3080, width: 70, lanes: 4, name: 'South Ring', kind: 'highway' },
     ];
     const minor = [
       { x1: 400, y1: 0, x2: 400, y2: 3200, width: 62, lanes: 2, name: 'Foundry Row' },
@@ -174,24 +187,20 @@ export class CityWorld {
       { x1: 1600, y1: 0, x2: 1600, y2: 3200, width: 66, lanes: 2, name: 'Tarpon Street' },
       { x1: 2000, y1: 0, x2: 2000, y2: 3200, width: 66, lanes: 2, name: 'Quay Road' },
       { x1: 0, y1: 350, x2: 2400, y2: 350, width: 58, lanes: 2, name: 'Garden Loop' },
-      { x1: 0, y1: 1050, x2: 2400, y2: 1050, width: 60, lanes: 2, name: 'Vantage Plaza' },
+      { x1: 0, y1: 1050, x2: 2400, y2: 1050, width: 62, lanes: 2, name: 'Vantage Way' },
       { x1: 0, y1: 1800, x2: 2400, y2: 1800, width: 62, lanes: 2, name: 'Market Row' },
       { x1: 0, y1: 2600, x2: 2000, y2: 2600, width: 62, lanes: 2, name: 'Terminal Way' },
       { x1: 0, y1: 2950, x2: 2400, y2: 2950, width: 58, lanes: 2, name: 'Tidewater Road' },
     ];
 
-    this.roads = [...major, ...minor].map((r) => {
-      const horizontal = r.y1 === r.y2;
-      return {
-        ...r,
-        horizontal,
-        dirX: Math.sign(r.x2 - r.x1),
-        dirY: Math.sign(r.y2 - r.y1),
-        half: r.width / 2,
-      };
-    });
+    this.roads = [...major, ...minor].map((r) => ({
+      ...r,
+      horizontal: r.y1 === r.y2,
+      dirX: Math.sign(r.x2 - r.x1),
+      dirY: Math.sign(r.y2 - r.y1),
+      half: r.width / 2,
+    }));
 
-    this.roadSamples = [];
     for (const road of this.roads) {
       const len = Math.hypot(road.x2 - road.x1, road.y2 - road.y1);
       const count = Math.max(3, Math.floor(len / 235));
@@ -206,10 +215,10 @@ export class CityWorld {
           h: road.horizontal ? range(this.rng, 5, 19) : range(this.rng, 24, 90),
           angle: range(this.rng, -0.05, 0.05),
           light: this.rng() > 0.55,
-          alpha: range(this.rng, 0.1, 0.24),
+          alpha: range(this.rng, 0.08, 0.22),
         });
       }
-      const cracks = Math.max(2, Math.floor(len / 480));
+      const cracks = Math.max(2, Math.floor(len / 500));
       for (let i = 0; i < cracks; i += 1) {
         const t = range(this.rng, 0.05, 0.95);
         let px = road.x1 + (road.x2 - road.x1) * t;
@@ -227,7 +236,7 @@ export class CityWorld {
             py += range(this.rng, -9, 9);
           }
         }
-        this.roadCracks.push({ points, alpha: range(this.rng, 0.1, 0.22) });
+        this.roadCracks.push({ points, alpha: range(this.rng, 0.08, 0.2) });
       }
     }
   }
@@ -268,12 +277,14 @@ export class CityWorld {
     }
   }
 
-  roadHalfAt(x, y) {
-    for (const r of this.roads) {
-      if (r.horizontal && Math.abs(y - r.y1) < r.half + 4) return { road: r, half: r.half, axis: 'h' };
-      if (!r.horizontal && Math.abs(x - r.x1) < r.half + 4) return { road: r, half: r.half, axis: 'v' };
-    }
-    return null;
+  verticalHalf(x) {
+    for (const r of this.roads) if (!r.horizontal && Math.abs(r.x1 - x) < 2) return r.half;
+    return 0;
+  }
+
+  horizontalHalf(y) {
+    for (const r of this.roads) if (r.horizontal && Math.abs(r.y1 - y) < 2) return r.half;
+    return 0;
   }
 
   generateBlocks() {
@@ -283,7 +294,7 @@ export class CityWorld {
         const x1 = X_CUTS[xi + 1];
         const y0 = Y_CUTS[yi];
         const y1 = Y_CUTS[yi + 1];
-        if (x0 >= 2400) continue;
+        if (x0 >= 2480) continue;
         if (y1 > 3200) continue;
         const left = this.verticalHalf(x0);
         const right = this.verticalHalf(x1);
@@ -293,21 +304,29 @@ export class CityWorld {
         const xMax = x1 - right - BLOCK_GAP;
         const yMin = y0 + top + BLOCK_GAP;
         const yMax = y1 - bottom - BLOCK_GAP;
-        if (xMax - xMin < 54 || yMax - yMin < 54) continue;
+        if (xMax - xMin < 52 || yMax - yMin < 52) continue;
         const midX = (xMin + xMax) / 2;
         const midY = (yMin + yMax) / 2;
         const district = districtAt(midX, midY);
-        const kind = this.chooseBlockKind(district, midX, midY);
+        const kind = this.chooseBlockKind(district);
         const block = {
           x: midX, y: midY, xMin, xMax, yMin, yMax,
           w: xMax - xMin, h: yMax - yMin,
           district: district.id,
           lot: district.lot,
           kind,
-          alley: this.rng() < (district.character === 'downtown' ? 0.5 : 0.28),
+          alley: this.rng() < (district.character === 'downtown' ? 0.48 : 0.26),
           seed: Math.floor(this.rng() * 1e9),
         };
         this.blocks.push(block);
+        this.lots.push({
+          x: midX, y: midY, xMin, xMax, yMin, yMax,
+          w: xMax - xMin, h: yMax - yMin,
+          district: district.id,
+          kind,
+          lot: district.lot,
+          seed: block.seed,
+        });
         if (block.alley && block.w > 150) {
           const vertical = this.rng() > 0.5;
           if (vertical) {
@@ -322,35 +341,21 @@ export class CityWorld {
     }
   }
 
-  verticalHalf(x) {
-    for (const r of this.roads) {
-      if (!r.horizontal && Math.abs(r.x1 - x) < 2) return r.half;
-    }
-    return 0;
-  }
-
-  horizontalHalf(y) {
-    for (const r of this.roads) {
-      if (r.horizontal && Math.abs(r.y1 - y) < 2) return r.half;
-    }
-    return 0;
-  }
-
-  chooseBlockKind(district, x, y) {
+  chooseBlockKind(district) {
     const roll = this.rng();
     switch (district.character) {
       case 'estates':
-        return roll < 0.62 ? 'estate' : roll < 0.82 ? 'park' : roll < 0.93 ? 'plaza' : 'parking';
+        return roll < 0.58 ? 'estate' : roll < 0.82 ? 'park' : roll < 0.92 ? 'plaza' : 'parking';
       case 'downtown':
-        return roll < 0.66 ? 'tower' : roll < 0.78 ? 'plaza' : roll < 0.9 ? 'parking' : 'lowrise';
+        return roll < 0.62 ? 'tower' : roll < 0.76 ? 'plaza' : roll < 0.9 ? 'parking' : 'lowrise';
       case 'industry':
-        return roll < 0.56 ? 'industry' : roll < 0.76 ? 'parking' : roll < 0.89 ? 'containers' : 'park';
+        return roll < 0.5 ? 'industry' : roll < 0.7 ? 'parking' : roll < 0.85 ? 'containers' : 'park';
       case 'docks':
-        return roll < 0.4 ? 'containers' : roll < 0.66 ? 'industry' : roll < 0.85 ? 'parking' : 'plaza';
+        return roll < 0.4 ? 'containers' : roll < 0.64 ? 'industry' : roll < 0.86 ? 'parking' : 'plaza';
       case 'market':
-        return roll < 0.62 ? 'lowrise' : roll < 0.76 ? 'park' : roll < 0.9 ? 'parking' : 'plaza';
+        return roll < 0.6 ? 'lowrise' : roll < 0.74 ? 'park' : roll < 0.9 ? 'parking' : 'plaza';
       case 'beach':
-        return roll < 0.5 ? 'lowrise' : roll < 0.75 ? 'parking' : 'park';
+        return roll < 0.48 ? 'lowrise' : roll < 0.72 ? 'parking' : roll < 0.9 ? 'park' : 'plaza';
       default:
         return roll < 0.6 ? 'lowrise' : 'parking';
     }
@@ -372,10 +377,10 @@ export class CityWorld {
         if (block.kind === 'park') {
           this.parkAreas.push({
             x: block.x, y: block.y, w: block.w, h: block.h, xMin, xMax, yMin, yMax,
-            pond: this.rng() < 0.45,
-            path: this.rng() > 0.35,
+            pond: this.rng() < 0.48,
+            path: this.rng() > 0.32,
           });
-          this.props.push({ type: 'fountain', x: block.x, y: block.y, r: Math.min(34, Math.min(block.w, block.h) * 0.18) });
+          this.props.push({ type: 'fountain', x: block.x, y: block.y, r: Math.min(32, Math.min(block.w, block.h) * 0.18) });
         }
         if (block.kind === 'plaza') {
           this.props.push({ type: 'fountain', x: block.x, y: block.y, r: Math.min(30, Math.min(block.w, block.h) * 0.16) });
@@ -404,9 +409,8 @@ export class CityWorld {
   }
 
   pushBuilding(b) {
-    // Keep landmark forecourts, major road mouths and neighbouring footprints clear.
     for (const L of Object.values(this.landmarks)) {
-      if (rectsOverlap(b, { x: L.x, y: L.y, w: 210, h: 180 }, 10)) return false;
+      if (rectsOverlap(b, { x: L.x, y: L.y, w: 220, h: 190 }, 12)) return false;
     }
     for (const existing of this.buildings) {
       if (rectsOverlap(b, existing, 2)) return false;
@@ -432,29 +436,29 @@ export class CityWorld {
   }
 
   buildEstates(block, xMin, xMax, yMin, yMax) {
-    const houseW = 78;
-    const houseH = 68;
-    for (let x = xMin + 8; x < xMax - houseW + 8; x += houseW + 48) {
-      for (let y = yMin + 8; y < yMax - houseH + 8; y += houseH + 44) {
+    const houseW = 76;
+    const houseH = 66;
+    for (let x = xMin + 8; x < xMax - houseW + 8; x += houseW + 46) {
+      for (let y = yMin + 8; y < yMax - houseH + 8; y += houseH + 42) {
         if (this.rng() < 0.14) continue;
         const pastel = pick(this.rng, ['#f3ead9', '#f7d9cf', '#e7efe1', '#f6e7bd', '#e4dcef', '#f2e4d0']);
-        const w = houseW + range(this.rng, -8, 12);
-        const h = houseH + range(this.rng, -6, 10);
         const b = {
-          x: x + houseW / 2, y: y + houseH / 2, w, h,
-          height: 15 + this.rng() * 9,
+          x: x + houseW / 2, y: y + houseH / 2,
+          w: houseW + range(this.rng, -8, 12), h: houseH + range(this.rng, -6, 10),
+          height: 14 + this.rng() * 9,
           color: pastel,
           roofColor: pick(this.rng, ['#c8664b', '#b95b48', '#d17a54', '#8f6b58', '#a94f5a']),
           type: 'house',
-          hasPool: this.rng() > 0.55,
-          hasDriveway: this.rng() > 0.3,
+          hasPool: this.rng() > 0.58,
+          hasDriveway: this.rng() > 0.28,
           windows: 2,
           windowRows: 2,
           windowCols: 3,
           awning: this.rng() > 0.62,
           awningColor: pick(this.rng, ['#c45a5a', '#3e8585', '#c4953d', '#557ea3']),
           parapet: this.rng() > 0.5,
-          garden: this.rng() > 0.25,
+          garden: this.rng() > 0.22,
+          door: true,
         };
         this.decorateRoof(b, 'house');
         this.pushBuilding(b);
@@ -470,13 +474,13 @@ export class CityWorld {
   }
 
   buildTowers(block, xMin, xMax, yMin, yMax, district) {
-    const bW = 106;
-    const bH = 106;
+    const bW = 104;
+    const bH = 104;
     let idx = Math.floor(this.rng() * TOWER_SIGNS.length);
-    for (let x = xMin + 4; x < xMax - bW + 12; x += bW + 28) {
-      for (let y = yMin + 4; y < yMax - bH + 12; y += bH + 28) {
+    for (let x = xMin + 4; x < xMax - bW + 12; x += bW + 26) {
+      for (let y = yMin + 4; y < yMax - bH + 12; y += bH + 26) {
         if (this.rng() < 0.11) continue;
-        const height = 44 + Math.floor(this.rng() * 72);
+        const height = 46 + Math.floor(this.rng() * 74);
         const material = this.rng();
         const glass = material < 0.46;
         const stone = material >= 0.46 && material < 0.78;
@@ -487,18 +491,16 @@ export class CityWorld {
           color: glass ? '#3b6476' : stone ? '#a89a86' : '#4a4652',
           roofColor: glass ? '#2c4c5c' : stone ? '#8e8271' : '#37343f',
           type: 'tower',
-          glass,
-          stone,
-          neonText: this.rng() > 0.42 ? TOWER_SIGNS[idx++ % TOWER_SIGNS.length] : null,
+          glass, stone,
+          neonText: this.rng() > 0.38 ? TOWER_SIGNS[idx++ % TOWER_SIGNS.length] : null,
           neonColor: this.rng() > 0.5 ? district.neon : '#ff7fa5',
-          hasHelipad: height > 84 && this.rng() > 0.55,
-          hasRoofPool: stone && this.rng() > 0.72,
+          hasHelipad: height > 86 && this.rng() > 0.5,
+          hasRoofPool: stone && this.rng() > 0.7,
           windows: 6,
           windowRows: 4 + Math.floor(height / 22),
           windowCols: 4,
           parapet: true,
           awning: false,
-          style: glass ? 'glass' : stone ? 'stone' : 'dark',
         };
         this.decorateRoof(b, glass ? 'tower' : 'stone');
         this.pushBuilding(b);
@@ -508,8 +510,8 @@ export class CityWorld {
 
   buildWarehouses(block, xMin, xMax, yMin, yMax) {
     const w = xMax - xMin - 12;
-    const h = Math.min(142, (yMax - yMin) / 2 - 12);
-    for (let y = yMin + 8; y < yMax - h + 12; y += h + 34) {
+    const h = Math.min(146, (yMax - yMin) / 2 - 12);
+    for (let y = yMin + 8; y < yMax - h + 12; y += h + 32) {
       const b = {
         x: xMin + w / 2 + 6, y: y + h / 2,
         w: Math.max(88, w), h: Math.max(64, h),
@@ -524,7 +526,6 @@ export class CityWorld {
         awning: false,
         parapet: false,
         rollerDoors: 1 + Math.floor(this.rng() * 3),
-        style: 'industry',
       };
       this.decorateRoof(b, 'industry');
       this.pushBuilding(b);
@@ -532,23 +533,17 @@ export class CityWorld {
   }
 
   buildContainers(block, xMin, xMax, yMin, yMax) {
-    const colors = ['#c94f43', '#3f7fa8', '#d99a35', '#4d8f68', '#8a5a9e', '#b9693f', '#4f8b9a'];
     for (let x = xMin + 10; x < xMax - 52; x += 58) {
       for (let y = yMin + 10; y < yMax - 34; y += 42) {
         if (this.rng() < 0.3) continue;
         const b = {
           x: x + 22, y: y + 13, w: 46, h: 26,
           height: 10 + (this.rng() > 0.55 ? 12 : 0),
-          color: pick(this.rng, colors),
+          color: pick(this.rng, CONTAINER_COLORS),
           roofColor: '#343a40',
           type: 'container',
-          windows: 0,
-          windowRows: 0,
-          windowCols: 0,
-          ribbed: true,
-          parapet: false,
-          awning: false,
-          style: 'container',
+          windows: 0, windowRows: 0, windowCols: 0,
+          ribbed: true, parapet: false, awning: false,
         };
         this.buildings.push(b);
       }
@@ -565,35 +560,32 @@ export class CityWorld {
 
   buildLowRises(block, xMin, xMax, yMin, yMax, district) {
     const shades = ['#d6c3a7', '#c9a98f', '#bd8d78', '#d9cbb6', '#a9b6b2', '#cfb8a0', '#b9a58c'];
-    let idx = Math.floor(this.rng() * SHOP_SIGNS.length);
     for (let x = xMin + 4; x < xMax - 80; x += 116) {
-      for (let y = yMin + 6; y < yMax - 62; y += 110) {
+      for (let y = yMin + 6; y < yMax - 62; y += 108) {
         if (this.rng() < 0.18) continue;
-        const w = 88 + this.rng() * 46;
-        const h = 68 + this.rng() * 38;
-        const sign = this.rng() > 0.28 ? pick(this.rng, SHOP_SIGNS) : null;
+        const w = 86 + this.rng() * 46;
+        const h = 66 + this.rng() * 38;
+        const sign = this.rng() > 0.26 ? pick(this.rng, SHOP_SIGNS) : null;
         const b = {
           x: x + w / 2, y: y + h / 2, w, h,
-          height: 17 + this.rng() * 22,
+          height: 16 + this.rng() * 22,
           color: pick(this.rng, shades),
           roofColor: pick(this.rng, ['#7a6654', '#6d6259', '#8b735f', '#6f5b4e']),
           type: 'lowrise',
           neonText: sign,
           neonColor: this.rng() > 0.45 ? district.neon : pick(this.rng, ['#ff7fa5', '#5ce1e6', '#ffd166']),
-          awning: this.rng() > 0.28,
+          awning: this.rng() > 0.26,
           awningColor: pick(this.rng, ['#c45a5a', '#3e8585', '#c4953d', '#557ea3', '#a45b78']),
           windows: 3,
           windowRows: 2,
           windowCols: 2 + Math.floor(this.rng() * 2),
           parapet: true,
-          style: 'brick',
           shopWindows: 2 + Math.floor(this.rng() * 3),
           door: this.rng() > 0.25,
           garden: false,
         };
         this.decorateRoof(b, 'shop');
         this.pushBuilding(b);
-        idx += 1;
       }
     }
   }
@@ -605,55 +597,61 @@ export class CityWorld {
   addLandmarks() {
     const L = this.landmarks;
     const clear = [
-      [L.diner, 170, 140], [L.chopShop, 250, 190], [L.safehouse, 220, 170],
-      [L.docks, 260, 190], [L.compound, 260, 210], [L.hospital, 230, 170],
-      [L.policeStation, 220, 170], [L.plaza, 280, 250], [L.valet, 230, 180],
-      [L.park, 260, 210],
+      [L.diner, 176, 146], [L.chopShop, 256, 194], [L.garage, 220, 180],
+      [L.safehouse, 226, 176], [L.docks, 266, 196], [L.compound, 266, 216],
+      [L.hospital, 236, 176], [L.policeStation, 226, 176], [L.plaza, 286, 256],
+      [L.valet, 236, 186], [L.park, 266, 216],
     ];
     for (const [point, w, h] of clear) this.clearArea(point.x, point.y, w, h);
 
     this.buildings.push(
       {
-        x: L.diner.x, y: L.diner.y, w: 100, h: 76, height: 23, color: '#f7e3cf',
+        x: L.diner.x, y: L.diner.y, w: 104, h: 78, height: 23, color: '#f7e3cf',
         roofColor: '#d96a57', type: 'landmark', neonText: 'PELICAN GRILL', neonColor: '#ff7f9e',
         awning: true, awningColor: '#cf6a6a', windows: 4, windowRows: 2, windowCols: 3,
-        parapet: true, style: 'diner', roofProps: [{ type: 'vent', dx: 20, dy: -12, size: 8, rotate: 0 }],
+        parapet: true, style: 'diner', roofProps: [{ type: 'vent', dx: 20, dy: -12, size: 8, rotate: 0 }], door: true,
       },
       {
-        x: L.chopShop.x, y: L.chopShop.y, w: 168, h: 110, height: 26, color: '#5c5a57',
+        x: L.chopShop.x, y: L.chopShop.y, w: 172, h: 112, height: 26, color: '#5c5a57',
         roofColor: '#3d3c3b', type: 'landmark', neonText: 'RUSTLINE', neonColor: '#ffb45c',
         windows: 2, windowRows: 1, windowCols: 3, awning: false, parapet: false,
         rollerDoors: 2, style: 'chop', roofProps: [{ type: 'tank', dx: -38, dy: 16, size: 12, rotate: 0 }],
       },
       {
-        x: L.safehouse.x, y: L.safehouse.y, w: 132, h: 96, height: 27, color: '#cfae8c',
+        x: L.safehouse.x, y: L.safehouse.y, w: 136, h: 98, height: 27, color: '#cfae8c',
         roofColor: '#7e5f46', type: 'landmark', neonText: 'SABAL', neonColor: '#8fe3a5',
         windows: 4, windowRows: 2, windowCols: 3, awning: true, awningColor: '#6f8f72',
-        parapet: true, style: 'house', garden: true,
+        parapet: true, style: 'house', garden: true, hasPool: true,
       },
       {
-        x: L.docks.x, y: L.docks.y, w: 182, h: 112, height: 31, color: '#586a70',
+        x: L.docks.x, y: L.docks.y, w: 188, h: 116, height: 31, color: '#586a70',
         roofColor: '#39494e', type: 'landmark', neonText: 'PIER 9', neonColor: '#59a9ff',
         windows: 3, windowRows: 2, windowCols: 4, awning: false, parapet: false,
         rollerDoors: 3, style: 'dock', roofProps: [{ type: 'tank', dx: 44, dy: -24, size: 14, rotate: 0 }],
       },
       {
-        x: L.compound.x, y: L.compound.y, w: 168, h: 122, height: 55, color: '#3b4652',
+        x: L.compound.x, y: L.compound.y, w: 172, h: 126, height: 55, color: '#3b4652',
         roofColor: '#252f38', type: 'landmark', neonText: 'CROWE ESTATE', neonColor: '#ffd166',
         hasHelipad: true, windows: 6, windowRows: 4, windowCols: 5, awning: false,
         parapet: true, style: 'estate', hasRoofPool: true,
       },
       {
-        x: L.hospital.x, y: L.hospital.y, w: 142, h: 102, height: 40, color: '#eef2f0',
+        x: L.hospital.x, y: L.hospital.y, w: 146, h: 104, height: 40, color: '#eef2f0',
         roofColor: '#c9d6d2', type: 'landmark', neonText: 'COSTA SOL GENERAL', neonColor: '#ff6f91',
         hasHelipad: true, windows: 5, windowRows: 4, windowCols: 5, awning: false,
         parapet: true, style: 'hospital',
       },
       {
-        x: L.policeStation.x, y: L.policeStation.y, w: 136, h: 102, height: 36, color: '#d8e3ec',
+        x: L.policeStation.x, y: L.policeStation.y, w: 140, h: 104, height: 36, color: '#d8e3ec',
         roofColor: '#5d89ad', type: 'landmark', neonText: 'POLICE HQ', neonColor: '#59a9ff',
         hasHelipad: true, windows: 5, windowRows: 3, windowCols: 4, awning: false,
         parapet: true, style: 'civic',
+      },
+      {
+        x: L.garage.x, y: L.garage.y, w: 150, h: 96, height: 19, color: '#b7a58f',
+        roofColor: '#5b4b3c', type: 'garage', neonText: 'RUSTLINE GARAGE', neonColor: '#ffb45c',
+        windows: 2, windowRows: 1, windowCols: 3, awning: true, awningColor: '#9c5a3c',
+        rollerDoors: 2, parapet: true, style: 'chop',
       },
     );
 
@@ -662,6 +660,7 @@ export class CityWorld {
       { type: 'valetSign', x: L.valet.x, y: L.valet.y - 62 },
       { type: 'statue', x: L.plaza.x + 10, y: L.plaza.y - 8, r: 22 },
       { type: 'gazebo', x: L.park.x, y: L.park.y - 60, r: 30 },
+      { type: 'garageSign', x: L.garage.x + 74, y: L.garage.y + 58 },
     );
     this.billboards.push(
       { x: 1760, y: 1390, text: 'VANTAGE', color: '#5ce1e6', angle: 0 },
@@ -669,6 +668,7 @@ export class CityWorld {
       { x: 2010, y: 2260, text: 'DRYDOCK 9', color: '#59a9ff', angle: 0 },
       { x: 820, y: 1330, text: 'SOLAR COLA', color: '#ffd166', angle: 0 },
       { x: 2360, y: 2520, text: 'CROWN HOTELS', color: '#ffb45c', angle: 0 },
+      { x: 1450, y: 2300, text: 'TIDEWATER MARKET', color: '#ffcf5c', angle: 0 },
     );
 
     for (const [key, point] of Object.entries(L)) {
@@ -678,16 +678,13 @@ export class CityWorld {
   }
 
   generateFoliage() {
-    // Ocean Boulevard palms, both curbs.
     for (let y = 50; y < 3150; y += 62) {
       this.palmTrees.push({ x: 2338 + this.rng() * 10, y: y + this.rng() * 8, size: 22 + this.rng() * 7 });
       this.palmTrees.push({ x: 2462 + this.rng() * 12, y: y + 22 + this.rng() * 8, size: 21 + this.rng() * 7 });
     }
-    // Beach palms.
     for (let y = 60; y < 3140; y += 84) {
       this.palmTrees.push({ x: 2616 + this.rng() * 52, y: y + this.rng() * 30, size: 24 + this.rng() * 9 });
     }
-    // Estates and market corners.
     for (let x = 70; x < 1060; x += 92) {
       for (let y = 70; y < 1400; y += 106) {
         if (this.rng() > 0.52) this.palmTrees.push({ x: x + this.rng() * 24, y: y + this.rng() * 24, size: 18 + this.rng() * 7 });
@@ -697,7 +694,6 @@ export class CityWorld {
       this.palmTrees.push({ x: range(this.rng, 60, 2380), y: range(this.rng, 60, 3140), size: range(this.rng, 17, 28) });
     }
 
-    // Streetlights. Major roads get pairs, the ring gets taller lamps.
     for (const road of this.roads) {
       const step = road.kind === 'highway' ? 170 : 145;
       const len = Math.hypot(road.x2 - road.x1, road.y2 - road.y1);
@@ -717,7 +713,6 @@ export class CityWorld {
       }
     }
 
-    // Boardwalk furniture, umbrellas, planters and news boxes.
     for (let y = 90; y < 3120; y += 118) {
       if (this.rng() > 0.5) this.props.push({ type: 'bench', x: 2522, y, angle: 0 });
       if (this.rng() > 0.58) {
@@ -727,6 +722,7 @@ export class CityWorld {
         });
       }
     }
+
     for (const block of this.blocks) {
       if (block.kind === 'industry' || block.kind === 'containers') {
         for (let i = 0; i < 4; i += 1) {
@@ -804,7 +800,6 @@ export class CityWorld {
         });
       }
     }
-    // A scatter of towels for the aerial read.
     for (let i = 0; i < 26; i += 1) {
       this.props.push({
         type: 'towel',
@@ -830,11 +825,85 @@ export class CityWorld {
           rx: range(this.rng, 16, 54),
           ry: range(this.rng, 5, 18),
           angle: road.horizontal ? range(this.rng, -0.12, 0.12) : Math.PI / 2 + range(this.rng, -0.12, 0.12),
-          alpha: range(this.rng, 0.16, 0.36),
+          alpha: range(this.rng, 0.14, 0.34),
           seed: this.rng() * 100,
         });
       }
     }
+  }
+
+  generateRamps() {
+    const candidates = [
+      { x: 1080, y: 1400, angle: 0, name: 'GRAND SLAM' },
+      { x: 2400, y: 2020, angle: -Math.PI / 2, name: 'OCEAN AIR' },
+      { x: 1200, y: 1860, angle: Math.PI / 2, name: 'MERIDIAN DROP' },
+      { x: 600, y: 2200, angle: 0, name: 'DRYDOCK HOP' },
+      { x: 2000, y: 2600, angle: Math.PI, name: 'TERMINAL LAUNCH' },
+      { x: 2400, y: 640, angle: -Math.PI / 2, name: 'PELICAN LIFT' },
+      { x: 760, y: 1400, angle: Math.PI, name: 'ESTATE JUMP' },
+      { x: 1600, y: 1050, angle: 0, name: 'VANTAGE KICKER' },
+      { x: 120, y: 1500, angle: Math.PI / 2, name: 'LOOP RAMP' },
+    ];
+    for (const c of candidates) {
+      this.ramps.push({
+        x: c.x,
+        y: c.y,
+        angle: c.angle,
+        w: 58,
+        h: 34,
+        name: c.name,
+        use: 0,
+      });
+    }
+    this.stuntRoutes.push(
+      { from: { x: 1500, y: 1400 }, to: { x: 2100, y: 1400 }, name: 'Grand Avenue run' },
+      { from: { x: 2400, y: 2200 }, to: { x: 2400, y: 1600 }, name: 'Ocean Boulevard drop' },
+      { from: { x: 900, y: 2200 }, to: { x: 2000, y: 2200 }, name: 'Drydock straight' },
+    );
+  }
+
+  generateCollectibles() {
+    const candidates = [
+      { x: 2524, y: 1500, name: 'Boardwalk tape' },
+      { x: 2960, y: 1660, name: 'Pier tape' },
+      { x: 720, y: 600, name: 'Park tape' },
+      { x: 2860, y: 2200, name: 'Marina tape' },
+      { x: 1260, y: 1240, name: 'Safehouse tape' },
+      { x: 1660, y: 1300, name: 'Plaza tape' },
+      { x: 2320, y: 2480, name: 'Dock tape' },
+      { x: 2580, y: 900, name: 'Beach tape' },
+      { x: 2540, y: 600, name: 'Estate tape' },
+      { x: 1520, y: 2260, name: 'Market tape' },
+      { x: 500, y: 2700, name: 'Ironworks tape' },
+      { x: 900, y: 3000, name: 'South Ring tape' },
+      { x: 2050, y: 1880, name: 'Vantage tape' },
+      { x: 300, y: 760, name: 'Garden tape' },
+      { x: 2300, y: 660, name: 'Pelican tape' },
+      { x: 1850, y: 2860, name: 'Drydock tape' },
+    ];
+    for (const c of candidates) {
+      if (this.collectibleSpots.length >= 12) break;
+      let spot = { x: c.x, y: c.y, name: c.name };
+      if (this.pointBlocked(spot.x, spot.y, 20)) {
+        const nudges = [[34, 0], [-34, 0], [0, 34], [0, -34], [52, 40], [-52, -40]];
+        for (const [dx, dy] of nudges) {
+          if (!this.pointBlocked(spot.x + dx, spot.y + dy, 20)) {
+            spot = { x: spot.x + dx, y: spot.y + dy, name: spot.name };
+            break;
+          }
+        }
+      }
+      if (this.pointBlocked(spot.x, spot.y, 20)) continue;
+      this.collectibleSpots.push(spot);
+    }
+  }
+
+  generateGarages() {
+    this.garages = [
+      { x: 520, y: 2380, name: 'Rustline Garage' },
+      { x: 1400, y: 1650, name: 'Sabal Auto Works' },
+      { x: 2330, y: 960, name: 'Coral Customs' },
+    ];
   }
 
   generatePois() {
@@ -844,6 +913,10 @@ export class CityWorld {
       { x: 2050, y: 3050, name: 'Tidewater Market', type: 'shop' },
       { x: 560, y: 2950, name: 'South Ring Fuel', type: 'fuel' },
       { x: 1560, y: 470, name: 'North Ring Fuel', type: 'fuel' },
+      { x: 2524, y: 1660, name: 'Coral Boardwalk', type: 'wave' },
+      { x: 520, y: 2300, name: 'Rustline Garage', type: 'wrench' },
+      { x: 1400, y: 1650, name: 'Sabal Auto Works', type: 'wrench' },
+      { x: 2330, y: 960, name: 'Coral Customs', type: 'wrench' },
     ];
     for (const p of extra) if (!this.pois.some((q) => q.name === p.name)) this.pois.push(p);
     this.spawnPoints.push(
@@ -852,6 +925,8 @@ export class CityWorld {
       { x: 340, y: 2500, name: 'Ironworks' },
       { x: 2300, y: 2460, name: 'Pier 9' },
       { x: 1380, y: 1360, name: 'Sabal Safehouse' },
+      { x: 2524, y: 1700, name: 'Coral Boardwalk' },
+      { x: 2200, y: 800, name: 'Pelican Pier' },
     );
   }
 
@@ -874,7 +949,16 @@ export class CityWorld {
     return false;
   }
 
+  buildingAt(x, y, radius = 10) {
+    for (const b of this.buildings) {
+      if (Math.abs(x - b.x) < b.w / 2 + radius && Math.abs(y - b.y) < b.h / 2 + radius) return b;
+    }
+    return null;
+  }
+
   pointBlocked(x, y, radius = 10) {
+    if (this.buildings.length > 0 && this.buildingAt(x, y, radius)) return true;
+    if (this.isWater(x, y)) return true;
     for (const col of this.getColliders(x, y, radius)) {
       if (col.type === 'building' && Math.abs(x - col.x) < col.w / 2 + radius && Math.abs(y - col.y) < col.h / 2 + radius) return true;
       if (col.type === 'water' && this.isWater(x, y)) return true;
@@ -904,6 +988,20 @@ export class CityWorld {
       if (!r.horizontal && Math.abs(x - r.x1) < r.half) return r;
     }
     return null;
+  }
+
+  // Nearest garage to a point, for the repair prompt.
+  nearestGarage(x, y, radius = 140) {
+    let best = null;
+    let bestD = radius;
+    for (const g of this.garages) {
+      const d = Math.hypot(g.x - x, g.y - y);
+      if (d < bestD) {
+        bestD = d;
+        best = g;
+      }
+    }
+    return best ? { garage: best, distance: bestD, cost: GARAGE_CONFIG.repairCost } : null;
   }
 
   onClick() {
@@ -969,8 +1067,6 @@ export class CityWorld {
     return !hit || hit.hitType !== 'building';
   }
 
-  // Cone-of-vision test used by police and enemies: near enough, in front,
-  // and with no wall between.
   seesPoint(x, y, angle, tx, ty, radius = 520, cone = 1.15) {
     const dx = tx - x;
     const dy = ty - y;
@@ -1037,7 +1133,14 @@ export class CityWorld {
 
   addSkidMark(x, y, angle, alpha = 0.5) {
     this.skidMarks.push({ x, y, angle, alpha, age: 0 });
-    if (this.skidMarks.length > 520) this.skidMarks.shift();
+    if (this.skidMarks.length > 560) this.skidMarks.shift();
+  }
+
+  rampAt(x, y, radius = 40) {
+    for (const ramp of this.ramps) {
+      if (Math.hypot(ramp.x - x, ramp.y - y) < radius) return ramp;
+    }
+    return null;
   }
 
   update(dt, time) {
@@ -1054,12 +1157,11 @@ export class CityWorld {
     for (let i = this.skidMarks.length - 1; i >= 0; i -= 1) {
       const s = this.skidMarks[i];
       s.age += dt;
-      if (s.age > 22) this.skidMarks.splice(i, 1);
+      if (s.age > 24) this.skidMarks.splice(i, 1);
     }
     void time;
   }
 
-  // Stable pseudo-random value for static art decisions.
   hash(x, y, salt = 0) {
     return hash2(x, y, salt + this.seed);
   }

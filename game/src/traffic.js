@@ -1,8 +1,8 @@
-// Leonida Heat - ambient traffic.
-// Civilian cars keep to the right-hand lane, brake for the car ahead, obey
-// signal heads, yield when a junction is occupied, honk when stuck and
-// scatter when gunfire starts. Spawning and recycling happen outside the
-// player's bubble so the street never visibly pops.
+// Leonida Heat v3 - ambient traffic.
+// Civilian cars keep to their lane, brake for the car and the pedestrian
+// ahead, obey the signal head, yield inside a busy junction, honk when stuck
+// and scatter when gunfire starts. Badly behaved drivers drift, good ones
+// signal. Spawning and recycling happen outside the player's bubble.
 
 import { Vehicle } from './entities.js';
 import { CIVILIAN_VEHICLES, PHYSICS_CONFIG } from './config.js';
@@ -16,21 +16,17 @@ export class TrafficManager {
     this.rng = rng;
     this.vehicles = [];
     this.parked = [];
-    this.maxTraffic = 28;
-    this.maxParked = 34;
+    this.maxTraffic = 30;
+    this.maxParked = 36;
     this.spawnTimer = 0;
     this.honkCooldown = 0;
     this.panic = 0;
     this.lastPanic = { x: 0, y: 0, r: 0 };
+    this.cruiseBias = 0.9 + rng() * 0.2;
   }
 
   lanePoint(road, progress, direction) {
-    if (road.horizontal) {
-      const y = road.y1 + direction * (road.width / 4);
-      return { x: road.x1 + (road.x2 - road.x1) * progress, y, angle: direction > 0 ? 0 : Math.PI };
-    }
-    const x = road.x1 - direction * (road.width / 4);
-    return { x, y: road.y1 + (road.y2 - road.y1) * progress, angle: direction > 0 ? Math.PI / 2 : -Math.PI / 2 };
+    return this.city.lanePoint(road, progress, direction);
   }
 
   spawnOnRoad(road, progress, direction, archetype = null) {
@@ -43,16 +39,19 @@ export class TrafficManager {
     car.aiMode = 'traffic';
     car.road = road;
     car.direction = direction;
-    car.cruiseSpeed = range(this.rng, PHYSICS_CONFIG.trafficCruiseMin, PHYSICS_CONFIG.trafficCruiseMax);
+    car.cruiseSpeed = range(this.rng, PHYSICS_CONFIG.trafficCruiseMin, PHYSICS_CONFIG.trafficCruiseMax) * this.cruiseBias;
     car.laneProgress = progress;
     car.driver = { isCivilian: true };
     car.occupiedByCivilian = true;
     car.stuckTimer = 0;
+    car.skill = 0.55 + this.rng() * 0.4;
+    car.signals = this.rng() > 0.3;
+    car.headlightsOn = true;
     this.vehicles.push(car);
     return car;
   }
 
-  seed(centerX, centerY, trafficCount = 16, parkedCount = 16) {
+  seed(centerX, centerY, trafficCount = 18, parkedCount = 18) {
     const nearby = this.city.roads
       .map((road) => {
         const mx = (road.x1 + road.x2) / 2;
@@ -67,9 +66,9 @@ export class TrafficManager {
       const base = road.horizontal
         ? (centerX - road.x1) / (road.x2 - road.x1 || 1)
         : (centerY - road.y1) / (road.y2 - road.y1 || 1);
-      for (let i = 0; i < 6 && spawned < trafficCount; i += 1) {
+      for (let i = 0; i < 7 && spawned < trafficCount; i += 1) {
         const dir = this.rng() > 0.5 ? 1 : -1;
-        const progress = clamp(base + range(this.rng, -0.24, 0.24), 0.06, 0.94);
+        const progress = clamp(base + range(this.rng, -0.3, 0.3), 0.06, 0.94);
         const car = this.spawnOnRoad(road, progress, dir);
         if (car && Math.hypot(car.x - centerX, car.y - centerY) < 1350) spawned += 1;
       }
@@ -83,17 +82,23 @@ export class TrafficManager {
       if (spot.occupied) continue;
       if (Math.hypot(spot.x - centerX, spot.y - centerY) > 1150) continue;
       spot.occupied = true;
-      const id = pick(this.rng, ['meridian', 'meridian', 'marlin', 'vipera', 'hauler', 'wasp', 'boxer']);
-      const car = new Vehicle(id, spot.x, spot.y, spot.angle);
-      car.aiMode = 'parked';
-      car.spot = spot;
-      this.parked.push(car);
+      this.parkAt(spot);
     }
+  }
+
+  parkAt(spot) {
+    const id = pick(this.rng, ['meridian', 'meridian', 'marlin', 'vipera', 'hauler', 'wasp', 'boxer', 'cabrio']);
+    const car = new Vehicle(id, spot.x, spot.y, spot.angle);
+    car.aiMode = 'parked';
+    car.spot = spot;
+    car.headlightsOn = false;
+    this.parked.push(car);
+    return car;
   }
 
   maintain(player) {
     if (this.vehicles.length < this.maxTraffic) {
-      const point = this.city.randomRoadPoint(player.x, player.y, 640, 1250, this.rng);
+      const point = this.city.randomRoadPoint(player.x, player.y, 640, 1280, this.rng);
       if (point.road) {
         const dir = this.rng() > 0.5 ? 1 : -1;
         this.spawnOnRoad(point.road, range(this.rng, 0.08, 0.92), dir);
@@ -103,32 +108,26 @@ export class TrafficManager {
       const v = this.vehicles[i];
       if (v === player.vehicle || v.isMission) continue;
       const d = Math.hypot(v.x - player.x, v.y - player.y);
-      if (d > 1750 || (v.isDestroyed && d > 800)) this.vehicles.splice(i, 1);
-      else if (!v.driver && v.aiMode === 'parked' && d > 1200 && !v.isPlayerVehicle) this.vehicles.splice(i, 1);
+      if (d > 1800 || (v.isDestroyed && d > 850)) this.vehicles.splice(i, 1);
     }
     for (let i = this.parked.length - 1; i >= 0; i -= 1) {
       const v = this.parked[i];
       if (v === player.vehicle) continue;
-      if (Math.hypot(v.x - player.x, v.y - player.y) > 2200 && !v.isMission) {
+      if (Math.hypot(v.x - player.x, v.y - player.y) > 2250 && !v.isMission) {
         if (v.spot) v.spot.occupied = false;
         this.parked.splice(i, 1);
       }
     }
-    // Refill a bay or two near the player.
     if (this.parked.length < this.maxParked) {
-      const spot = this.city.parkingSpots.find((s) => !s.occupied && Math.hypot(s.x - player.x, s.y - player.y) < 1000 && !this.parked.some((p) => p.spot === s));
+      const spot = this.city.parkingSpots.find((s) => !s.occupied && Math.hypot(s.x - player.x, s.y - player.y) < 1050 && !this.parked.some((p) => p.spot === s));
       if (spot) {
         spot.occupied = true;
-        const id = pick(this.rng, ['meridian', 'meridian', 'marlin', 'vipera', 'hauler', 'boxer']);
-        const car = new Vehicle(id, spot.x, spot.y, spot.angle);
-        car.aiMode = 'parked';
-        car.spot = spot;
-        this.parked.push(car);
+        this.parkAt(spot);
       }
     }
   }
 
-  update(dt, player, particleSys, audio, police) {
+  update(dt, player, particleSys, audio, police, game = null) {
     this.spawnTimer += dt;
     this.honkCooldown -= dt;
     this.panic = Math.max(0, this.panic - dt);
@@ -137,39 +136,39 @@ export class TrafficManager {
       this.maintain(player);
     }
 
+    const surface = { wetness: game?.weather?.wetness || 0 };
     for (let i = this.vehicles.length - 1; i >= 0; i -= 1) {
       const v = this.vehicles[i];
       if (v.isMission && v !== player.vehicle) continue;
       if (v.isDestroyed) {
-        v.update(dt, this.city, particleSys, audio);
-        if (Math.hypot(v.x - player.x, v.y - player.y) > 900) this.vehicles.splice(i, 1);
+        v.update(dt, this.city, particleSys, audio, surface);
+        if (Math.hypot(v.x - player.x, v.y - player.y) > 950) this.vehicles.splice(i, 1);
         continue;
       }
       if (v === player.vehicle) continue;
       if (player.hotwire && player.hotwire.vehicle === v) {
         v.brake(1, dt);
-        v.update(dt, this.city, particleSys, audio);
+        v.update(dt, this.city, particleSys, audio, surface);
         continue;
       }
       if (!v.driver || v.aiMode === 'parked' || v.aiMode === 'roadblock') {
         v.brake(0.45, dt);
-        v.update(dt, this.city, particleSys, audio);
+        v.update(dt, this.city, particleSys, audio, surface);
         continue;
       }
-      this.driveCivilian(v, dt, player, audio, police);
-      v.update(dt, this.city, particleSys, audio);
+      this.driveCivilian(v, dt, player, audio, police, game);
+      v.update(dt, this.city, particleSys, audio, surface);
     }
 
     for (const v of this.parked) {
       if (v === player.vehicle) continue;
       if (player.hotwire && player.hotwire.vehicle === v) {
         v.brake(1, dt);
-        v.update(dt, this.city, particleSys, audio);
+        v.update(dt, this.city, particleSys, audio, surface);
       }
     }
   }
 
-  // A gunshot or a crash sends nearby traffic into a short panic.
   panicAt(x, y, radius = 340) {
     this.panic = 4;
     this.lastPanic = { x, y, r: radius };
@@ -182,7 +181,7 @@ export class TrafficManager {
     }
   }
 
-  driveCivilian(v, dt, player, audio, police) {
+  driveCivilian(v, dt, player, audio, police, game = null) {
     const fx = Math.cos(v.angle);
     const fy = Math.sin(v.angle);
     let brake = false;
@@ -191,6 +190,7 @@ export class TrafficManager {
     let aheadRef = null;
     let aheadDist = Infinity;
     let blockedByCar = false;
+    let pedestrianAhead = false;
 
     for (const other of this.vehicles) {
       if (other === v || other.isDestroyed) continue;
@@ -198,7 +198,7 @@ export class TrafficManager {
       const dy = other.y - v.y;
       const forwardDist = dx * fx + dy * fy;
       const sideDist = Math.abs(-dx * fy + dy * fx);
-      if (forwardDist > 0 && forwardDist < 135 && sideDist < 34) {
+      if (forwardDist > 0 && forwardDist < 138 && sideDist < 36) {
         brake = true;
         emergency = Math.max(emergency, forwardDist < 95 ? 2 : 1);
         aheadRef = other;
@@ -212,7 +212,7 @@ export class TrafficManager {
       const dy = player.vehicle.y - v.y;
       const fd = dx * fx + dy * fy;
       const sd = Math.abs(-dx * fy + dy * fx);
-      if (fd > 0 && fd < 142 && sd < 36) {
+      if (fd > 0 && fd < 144 && sd < 38) {
         brake = true;
         emergency = Math.max(emergency, fd < 96 ? 2 : 1);
         aheadRef = player.vehicle;
@@ -221,7 +221,21 @@ export class TrafficManager {
       }
     }
 
-    // Signal obedience and junction yielding.
+    // Pedestrians in the road ahead: brake rather than plough through.
+    for (const ped of game?.combat?.pedestrians || []) {
+      if (ped.isDead) continue;
+      const dx = ped.x - v.x;
+      const dy = ped.y - v.y;
+      const fd = dx * fx + dy * fy;
+      const sd = Math.abs(-dx * fy + dy * fx);
+      if (fd > 0 && fd < 76 && sd < 30) {
+        brake = true;
+        emergency = Math.max(emergency, 1);
+        pedestrianAhead = true;
+        break;
+      }
+    }
+
     if (v.road) {
       for (const inter of this.city.intersections) {
         const light = inter.light;
@@ -248,9 +262,8 @@ export class TrafficManager {
             d = v.y - stopDist;
           }
         }
-        if (d > 0 && d < 165) {
+        if (d > 0 && d < 170) {
           if (light.state === 'red') redDist = Math.min(redDist, d);
-          // Yield to a car already in the box unless we are already inside.
           const inBox = Math.abs(v.x - inter.x) < inter.vWidth / 2 + 8 && Math.abs(v.y - inter.y) < inter.hWidth / 2 + 8;
           if (!inBox && d < 95 && this.junctionOccupied(inter, v)) redDist = Math.min(redDist, d);
           break;
@@ -258,9 +271,8 @@ export class TrafficManager {
       }
     }
 
-    // Lane target a little ahead of the nose.
     if (v.road) {
-      const ahead = 116;
+      const ahead = 118;
       let tx = v.x + fx * ahead;
       let ty = v.y + fy * ahead;
       if (v.road.horizontal) ty = v.road.y1 + v.direction * (v.road.width / 4);
@@ -269,9 +281,10 @@ export class TrafficManager {
       let diff = desired - v.angle;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      let steer = clamp(diff * 2.8, -1, 1);
-      // A little panic swerve.
+      let steer = clamp(diff * 2.9, -1, 1);
       if (v.panic > 0) steer += Math.sin(v.odometer * 0.05) * 0.18;
+      if (v.signals && Math.abs(diff) > 0.18) v.indicator = diff > 0 ? 1 : -1;
+      else v.indicator = 0;
       v.steer(steer);
     } else {
       v.steer(0);
@@ -283,7 +296,6 @@ export class TrafficManager {
         : (v.y - v.road.y1) / (v.road.y2 - v.road.y1 || 1))
       : 0.5;
     v.laneProgress = progress;
-    // Turn around at the end of the block rather than driving off the map.
     if (v.road && (progress > 0.985 || progress < 0.015)) {
       v.direction *= -1;
       v.vx *= 0.65;
@@ -335,8 +347,9 @@ export class TrafficManager {
       const factor = v.panic > 0 ? 1 : Math.min(1, v.cruiseSpeed / 300);
       v.accelerate(factor, dt);
     }
+    void pedestrianAhead;
+    void police;
 
-    // Stuck detection: nudge around a blocked box after a while.
     if (Math.hypot(v.x - v.lastX, v.y - v.lastY) < 1.2 && v.speed < 8) v.stuckTimer += dt;
     else v.stuckTimer = 0;
     if (v.stuckTimer > 7) {
@@ -349,7 +362,6 @@ export class TrafficManager {
       v.despawnTimer += dt;
       if (v.despawnTimer > 2) v.hp = 1;
     }
-    void police;
   }
 
   junctionOccupied(inter, self) {
@@ -360,7 +372,7 @@ export class TrafficManager {
     return false;
   }
 
-  findNearestVehicle(x, y, maxDist = 76) {
+  findNearestVehicle(x, y, maxDist = 80) {
     let best = null;
     let bestD = maxDist;
     for (const v of [...this.vehicles, ...this.parked]) {
@@ -378,7 +390,7 @@ export class TrafficManager {
     if (!vehicle || vehicle.isDestroyed) return false;
     if (vehicle.occupiedByCivilian) {
       player.hotwire = { vehicle, timer: 1.05, total: 1.05 };
-      if (ui) ui.showToast('Hotwiring — keep still!', 'warning', 1.4);
+      if (ui) ui.showToast('Hotwiring - keep still!', 'warning', 1.4);
       if (audio) audio.playHotwire();
       vehicle.alarm = 1.2;
       return true;
@@ -419,6 +431,7 @@ export class TrafficManager {
       x: vehicle.x + Math.cos(angle) * 34,
       y: vehicle.y + Math.sin(angle) * 34,
       fleeFrom() {},
+      isDead: false,
     };
     vehicle.driver = null;
     vehicle.occupiedByCivilian = false;

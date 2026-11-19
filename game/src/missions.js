@@ -1,7 +1,8 @@
-// Leonida Heat - the five-job story of Leo Calder and Maya Cruz.
-// Jobs escalate from a valet theft to a defended handoff, a dockside score,
-// an armoured convoy and finally Crowe's estate. Each step is a checkpoint;
-// retrying resumes the current objective rather than the whole job.
+// Leonida Heat v3 - the five-job story of Leo Calder and Maya Cruz.
+// New beats this pass: a wet valet handoff, a plaza rescue that turns into a
+// timed delivery, a marina case drop, an escorted armoured haul and a final
+// estate siege with a grenade-throwing boss. Every job opens on a short
+// speaker-named briefing and checkpoints at each step.
 
 import { Vehicle } from './entities.js';
 import { Enemy } from './combat.js';
@@ -12,94 +13,110 @@ const CAST = {
   crowe: 'Silas Crowe',
   dispatch: 'Costa Sol Dispatch',
   rourke: 'Dess Rourke',
+  valet: 'Valet Captain',
 };
 
 const MISSIONS = [
   {
     id: 1,
-    title: 'Cold Start',
-    reward: 1400,
-    intro: 'Maya has a valet ticket and a buyer with no patience.',
+    title: 'Sunset Valet',
+    reward: 1600,
+    intro: 'A valet ticket, a red Marlin, and a buyer with no patience.',
+    briefing: [
+      { speaker: CAST.maya, portrait: 'maya', text: 'Leo. Pelican Grill, west patio. The city looks expensive because it is. That is why we take things.' },
+      { speaker: CAST.leo, portrait: 'leo', text: 'You called me out of bed for a valet stand?' },
+      { speaker: CAST.maya, portrait: 'maya', text: 'I called you because the owner tips in threats. Red Marlin, keys in the console. Do not let him tip you.' },
+    ],
     steps: [
       {
         type: 'waypoint',
         text: 'Meet Maya at The Pelican Grill on the Coral Strip',
         target: { x: 2560, y: 1198, radius: 66 },
-        dialog: { speaker: CAST.maya, text: 'Leo. Over here by the grill. Costa Sol looks expensive because it is. That is why we take things.' },
+        dialog: { speaker: CAST.maya, text: 'Over here by the grill. Keep the engine warm; Rustline closes at midnight.' },
       },
       {
         type: 'steal_vehicle',
-        text: 'Take the Marlin GT from Coral Valet',
-        target: { x: 2560, y: 900, radius: 62 },
+        text: 'Take the red Marlin GT from Coral Valet',
+        target: { x: 2560, y: 900, radius: 64 },
         vehicle: 'marlin',
-        dialog: { speaker: CAST.maya, text: 'Red Marlin, valet stand, keys in the console. The owner tips in threats. Do not let him tip you.' },
+        dialog: { speaker: CAST.leo, text: 'Clean paint, full tank. The owner is going to miss this one.' },
       },
       {
         type: 'deliver_vehicle',
-        text: 'Deliver the Marlin to Rustline Chop Shop — 75 seconds',
-        target: { x: 350, y: 2570, radius: 82 },
+        text: 'Deliver the Marlin to Rustline - 72 seconds',
+        target: { x: 350, y: 2570, radius: 84 },
         requireTargetVehicle: true,
-        timeLimit: 75,
+        timeLimit: 72,
         wantedOnStart: 1,
         vehicle: 'marlin',
-        dialog: { speaker: CAST.leo, text: 'Clean paint, full tank. The Ironworks always pays on delivery. Usually.' },
+        dialog: { speaker: CAST.maya, text: 'A patrol picked up the plate. Lose the tail if you can, but get it behind the garage door.' },
       },
     ],
   },
   {
     id: 2,
     title: 'Plaza Debt',
-    reward: 3400,
-    intro: 'A loan shark parked the wrong car in the wrong plaza.',
+    reward: 3800,
+    intro: 'Rourke parked the wrong car in the wrong plaza.',
+    briefing: [
+      { speaker: CAST.maya, portrait: 'maya', text: 'Rourke has four boys babysitting a blue Vipera by the Vantage fountain. The car is owed to us.' },
+      { speaker: CAST.leo, portrait: 'leo', text: 'And the boys?' },
+      { speaker: CAST.maya, portrait: 'maya', text: 'A rounding error. I left something louder under the fountain. Try not to redecorate the whole plaza.' },
+    ],
     steps: [
       {
         type: 'waypoint',
         text: 'Meet Maya at Vantage Plaza',
         target: { x: 1750, y: 1482, radius: 72 },
-        dialog: { speaker: CAST.maya, text: 'Rourke’s boys are babysitting a blue Vipera by the fountain. The car is owed to us. The boys are a rounding error.' },
+        dialog: { speaker: CAST.maya, text: 'Fountain, north side. They have the car keys and no imagination.' },
       },
       {
         type: 'clear_and_steal',
         text: 'Clear the guards and take the Vipera',
         target: { x: 1830, y: 1535, radius: 74 },
         vehicle: 'vipera',
-        guards: 3,
+        guards: 4,
         guardWeapon: 'pistol',
         grantWeapon: 'smg',
-        dialog: { speaker: CAST.maya, text: 'I left something louder under the fountain. Try not to redecorate the whole plaza.' },
+        dialog: { speaker: CAST.maya, text: 'I slipped a Tide SMG under the fountain. Four guards, one car, no witnesses.' },
       },
       {
         type: 'deliver_vehicle',
-        text: 'Deliver the Vipera to Sabal Safehouse — 85 seconds',
+        text: 'Deliver the Vipera to Sabal Safehouse - 85 seconds',
         target: { x: 1330, y: 1418, radius: 74 },
         requireTargetVehicle: true,
         timeLimit: 85,
         wantedOnStart: 2,
         vehicle: 'vipera',
-        dialog: { speaker: CAST.maya, text: 'The plate is hot now. Lose the tail if you can; just get it behind the garage door before the clock runs dry.' },
+        dialog: { speaker: CAST.maya, text: 'The plate is hot now. The safehouse door is open; do not stop for lights.' },
       },
     ],
   },
   {
     id: 3,
     title: 'Tidewater Score',
-    reward: 5200,
+    reward: 5600,
     intro: 'A silver case at Pier 9 is worth more than the warehouse around it.',
+    briefing: [
+      { speaker: CAST.maya, portrait: 'maya', text: 'Crowe is unloading at Pier 9. Silver case, cold storage, five men who know how to use the dark.' },
+      { speaker: CAST.leo, portrait: 'leo', text: 'Five guards, one case. Simple arithmetic.' },
+      { speaker: CAST.maya, portrait: 'maya', text: 'The case is tagged. The moment you lift it, every patrol on the docks hears the alarm. Bring it to the marina.' },
+    ],
     steps: [
       {
         type: 'waypoint',
         text: 'Reach Pier 9 in the Drydock Quarter',
         target: { x: 2250, y: 2600, radius: 78 },
-        dialog: { speaker: CAST.maya, text: 'Crowe’s crew is unloading at Pier 9. The silver case goes to the safehouse. Everything between you and it does not.' },
+        dialog: { speaker: CAST.maya, text: 'Loading bay is south of the containers. Watch the catwalk.' },
       },
       {
         type: 'eliminate',
-        text: 'Take out the four dock guards',
+        text: 'Take out the five dock guards',
         target: { x: 2250, y: 2565, radius: 100 },
-        guards: 4,
+        guards: 5,
         guardWeapon: 'smg',
         spawnAt: { x: 2250, y: 2565, spread: 118 },
-        dialog: { speaker: CAST.leo, text: 'Four guards, one case. Simple arithmetic.' },
+        dialog: { speaker: CAST.leo, text: 'Four guards, one case. Simple arithmetic. Five if I count the one on the crane.' },
       },
       {
         type: 'collect',
@@ -110,25 +127,30 @@ const MISSIONS = [
       },
       {
         type: 'deliver',
-        text: 'Escape the heat and reach the Sabal Safehouse — 100 seconds',
-        target: { x: 1330, y: 1418, radius: 78 },
-        timeLimit: 100,
+        text: 'Reach the Quay Marina and drop the case - 95 seconds',
+        target: { x: 2690, y: 2260, radius: 82 },
+        timeLimit: 95,
         escape: true,
-        dialog: { speaker: CAST.maya, text: 'Drop the case and the heat dies with it. Do not stop for anyone.' },
+        dialog: { speaker: CAST.maya, text: 'The boat is tied at the arm. Drop the case and the heat dies with it. Do not stop for anyone.' },
       },
     ],
   },
   {
     id: 4,
     title: 'Armoured Run',
-    reward: 9000,
+    reward: 9500,
     intro: 'A hauler full of stones is running Grand Avenue with two escorts.',
+    briefing: [
+      { speaker: CAST.dispatch, portrait: 'dispatch', text: 'Armoured hauler, two escorts, diamonds in the back. It reaches the east bridge in four minutes.' },
+      { speaker: CAST.maya, portrait: 'maya', text: 'Hit it on Grand Avenue before it reaches Ocean. The crate goes to Rustline; the escorts are your problem.' },
+      { speaker: CAST.leo, portrait: 'leo', text: 'Big ugly van. Bigger payday.' },
+    ],
     steps: [
       {
         type: 'waypoint',
         text: 'Intercept the convoy on Grand Avenue',
         target: { x: 1480, y: 1400, radius: 92 },
-        dialog: { speaker: CAST.maya, text: 'Armoured hauler, two escorts, diamonds in the back. Hit it before it reaches the east bridge.' },
+        dialog: { speaker: CAST.maya, text: 'They are rolling east. Pin the hauler before the bridge and the escorts will scatter.' },
       },
       {
         type: 'destroy_convoy',
@@ -136,64 +158,69 @@ const MISSIONS = [
         target: { x: 1500, y: 1400, radius: 110 },
         vehicle: 'hauler',
         timeLimit: 70,
-        dialog: { speaker: CAST.leo, text: 'Big ugly van. Bigger payday.' },
+        dialog: { speaker: CAST.leo, text: 'Big ugly van, bigger payday. Let us see what the bumper is worth.' },
       },
       {
         type: 'collect',
         text: 'Grab the diamond crate from the wreck',
         target: { x: 1500, y: 1400, radius: 64 },
         wanted: 3,
-        dialog: { speaker: CAST.maya, text: 'Crate’s in the cab. Three stars and a city full of mirrors. Go.' },
+        dialog: { speaker: CAST.maya, text: 'Crate is in the cab. Three stars and a city full of mirrors. Go.' },
       },
       {
         type: 'deliver',
-        text: 'Deliver the diamonds to Rustline — 110 seconds',
+        text: 'Deliver the diamonds to Rustline - 105 seconds',
         target: { x: 350, y: 2570, radius: 84 },
-        timeLimit: 110,
+        timeLimit: 105,
         escape: true,
-        dialog: { speaker: CAST.maya, text: 'Three stars, Leo. The whole city is awake now. Get to the Ironworks.' },
+        dialog: { speaker: CAST.maya, text: 'The whole city is awake now. Get to the Ironworks.' },
       },
     ],
   },
   {
     id: 5,
-    title: 'Crowe’s Table',
-    reward: 24000,
+    title: "Crowe's Table",
+    reward: 26000,
     intro: 'Silas Crowe is done hiding behind his guards.',
+    briefing: [
+      { speaker: CAST.maya, portrait: 'maya', text: 'This is it. Crowe is behind that gate. I put a rifle and a vest in the dunes for you.' },
+      { speaker: CAST.crowe, portrait: 'crowe', text: 'You think this city belongs to people like you? I built Costa Sol out of other people’s ruin.' },
+      { speaker: CAST.leo, portrait: 'leo', text: 'Then you will not mind if we take the table.' },
+    ],
     steps: [
       {
         type: 'waypoint',
         text: 'Storm the Crowe Estate on the north beach',
         target: { x: 2560, y: 730, radius: 86 },
-        dialog: { speaker: CAST.maya, text: 'This is it. Crowe is behind that gate. I put a rifle and a vest in the dunes for you.' },
+        dialog: { speaker: CAST.maya, text: 'Front gate, then the forecourt. Keep moving; his crew likes crossfire.' },
       },
       {
         type: 'defend',
-        text: 'Hold the estate forecourt for 38 seconds',
+        text: 'Hold the estate forecourt for 36 seconds',
         target: { x: 2560, y: 610, radius: 160 },
-        duration: 38,
-        guards: 3,
+        duration: 36,
+        guards: 4,
         guardWeapon: 'smg',
         waves: 2,
         grantWeapon: 'rifle',
         wantedOnStart: 2,
-        dialog: { speaker: CAST.crowe, text: 'You think this city belongs to people like you? I built Costa Sol out of other people’s ruin.' },
+        dialog: { speaker: CAST.crowe, text: 'You think this city belongs to people like you? Come inside, Calder. I will show you what the view is worth.' },
       },
       {
         type: 'boss_fight',
         text: 'Defeat Silas Crowe and his crew',
-        target: { x: 2560, y: 470, radius: 120 },
-        guards: 4,
+        target: { x: 2560, y: 680, radius: 120 },
+        guards: 5,
         grantWeapon: 'rifle',
         supply: true,
         wantedOnStart: 3,
-        dialog: { speaker: CAST.crowe, text: 'Come inside, Calder. I will show you what the view is worth.' },
+        dialog: { speaker: CAST.crowe, text: 'I built this city out of other people’s ruin. You will not take the table.' },
       },
       {
         type: 'deliver',
-        text: 'Escape the manhunt and reach the Sabal Safehouse',
+        text: 'Escape the manhunt and reach the Sabal Safehouse - 140 seconds',
         target: { x: 1330, y: 1418, radius: 86 },
-        timeLimit: 150,
+        timeLimit: 140,
         escape: true,
         wantedOnStart: 4,
         dialog: { speaker: CAST.maya, text: 'Crowe is down. Do not stop now. The safehouse and the whole city are waiting.' },
@@ -226,6 +253,8 @@ export class MissionManager {
     this.courierIndex = 0;
     this.boss = null;
     this.defend = null;
+    this.briefingShown = false;
+    this.checkpointNotice = '';
   }
 
   get definition() {
@@ -285,11 +314,11 @@ export class MissionManager {
     return marker && Math.hypot(marker.x - x, marker.y - y) < marker.radius + 40;
   }
 
-  start(index = this.currentIndex) {
-    return this.startFrom(index, 0);
+  start(index = this.currentIndex, options = {}) {
+    return this.startFrom(index, 0, false, options);
   }
 
-  startFrom(index, step = 0, retry = false) {
+  startFrom(index, step = 0, retry = false, options = {}) {
     if (index < 0 || index >= this.defs.length) return false;
     this.clearActors();
     this.currentIndex = index;
@@ -307,12 +336,15 @@ export class MissionManager {
     this.game.state = 'playing';
     if (!retry) this.game.showMissionBanner(this.definition, index);
     this.setupStep(retry);
+    if (!retry && !options.silent) {
+      this.game.beginMissionBriefing(this.definition);
+    }
     this.game.autosave();
     return true;
   }
 
   resume(index, step) {
-    return this.startFrom(index, step, true);
+    return this.startFrom(index, step, true, { silent: true });
   }
 
   retry() {
@@ -322,7 +354,7 @@ export class MissionManager {
     this.game.player.health = Math.max(60, this.game.player.health);
     this.game.player.armor = Math.max(30, this.game.player.armor);
     this.game.police.clearWanted();
-    this.startFrom(index, step, true);
+    this.startFrom(index, step, true, { silent: true });
     this.game.ui.showToast('Checkpoint retry. Stay sharp.', 'warning', 2.4);
   }
 
@@ -368,6 +400,7 @@ export class MissionManager {
     this.game.ui.objectiveHint = '';
     this.defend = null;
     this.boss = null;
+    this.checkpointNotice = '';
 
     if (step.grantWeapon) {
       this.game.player.giveWeapon(step.grantWeapon, 2);
@@ -378,8 +411,10 @@ export class MissionManager {
     }
     if (step.supply) {
       this.game.player.armor = Math.max(this.game.player.armor, 100);
+      this.game.player.grenades = Math.max(this.game.player.grenades, 3);
       this.game.spawnPickup('health', 2500, 640);
       this.game.spawnPickup('armor', 2610, 640);
+      this.game.spawnPickup('grenade', 2540, 700);
     }
     if (step.wantedOnStart) this.game.police.setWanted(step.wantedOnStart);
 
@@ -413,15 +448,13 @@ export class MissionManager {
         wavesSpawned: 0,
         waves: step.waves || 2,
         leaveTimer: 0,
-        spawnedWaves: 0,
       };
       this.spawnGuards(step.target.x, step.target.y - 90, 2, step.guardWeapon || 'smg', 80);
     } else if (step.type === 'deliver_vehicle' && step.requireTargetVehicle && !this.targetVehicle) {
-      // A restored checkpoint must still have its objective car nearby.
       this.spawnTargetVehicle({ ...step, target: { x: this.game.player.x + 90, y: this.game.player.y, radius: step.target.radius } });
     }
 
-    if (step.dialog && !resumed) this.game.showDialog(step.dialog.speaker, step.dialog.text);
+    if (step.dialog && !resumed) this.game.showChatter(step.dialog.speaker, step.dialog.text, 5.5);
     if (this.stepTimeLimit) this.game.ui.showToast(`Timer started: ${this.stepTimeLimit}s`, 'warning', 2.2);
   }
 
@@ -468,6 +501,8 @@ export class MissionManager {
         gy = y + Math.abs(Math.sin(angle)) * spread * 0.6 + 30;
       }
       const e = new Enemy(gx, gy, weapon);
+      if (i === 0) e.squadRole = 'flank';
+      if (i === 1) e.squadRole = 'cover';
       this.game.combat.enemies.push(e);
       this.entities.push(e);
     }
@@ -498,7 +533,7 @@ export class MissionManager {
       this.game.traffic.vehicles.push(e);
       this.convoy.push(e);
     }
-    if (!resumed) this.game.ui.showToast('Convoy spotted — stop the hauler!', 'danger', 3);
+    if (!resumed) this.game.ui.showToast('Convoy spotted - stop the hauler!', 'danger', 3);
   }
 
   spawnBoss(step) {
@@ -508,9 +543,10 @@ export class MissionManager {
     this.boss = boss;
     const count = step.guards || 4;
     for (let i = 0; i < count; i += 1) {
-      const gx = step.target.x - 110 + (i / (Math.max(1, count - 1))) * 220;
+      const gx = step.target.x - 110 + (i / Math.max(1, count - 1)) * 220;
       const gy = step.target.y + 34 + (i % 2) * 40;
       const guard = new Enemy(gx, gy, i % 2 === 0 ? 'smg' : 'shotgun');
+      guard.squadRole = i % 3 === 0 ? 'flank' : 'press';
       this.game.combat.enemies.push(guard);
       this.entities.push(guard);
     }
@@ -529,7 +565,6 @@ export class MissionManager {
       return;
     }
 
-    // Moving objectives.
     if (step.type === 'destroy_convoy') {
       for (const v of this.convoy) {
         if (v === this.targetVehicle) {
@@ -547,7 +582,7 @@ export class MissionManager {
           v.vy = (targetY - v.y) * 3.4;
           v.angle = Math.atan2(v.vy, v.vx) || 0;
         }
-        v.update(dt, this.city, this.game.particles, this.game.audio);
+        v.update(dt, this.city, this.game.particles, this.game.audio, { wetness: this.game.weather?.wetness || 0 });
       }
       if (this.convoyEscaped) {
         this.fail('The hauler escaped with the diamonds.');
@@ -600,14 +635,14 @@ export class MissionManager {
       const dist = Math.hypot(player.x - step.target.x, player.y - step.target.y);
       if (dist > 330) {
         d.leaveTimer += dt;
-        this.game.ui.objectiveHint = `Return to the forecourt — ${Math.max(0, 8 - Math.floor(d.leaveTimer))}s`;
+        this.game.ui.objectiveHint = `Return to the forecourt - ${Math.max(0, 8 - Math.floor(d.leaveTimer))}s`;
         if (d.leaveTimer > 8) {
           this.fail('You abandoned the forecourt.');
           return;
         }
       } else {
         d.leaveTimer = Math.max(0, d.leaveTimer - dt * 1.5);
-        this.game.ui.objectiveHint = `Hold — ${Math.ceil(step.duration - d.elapsed)}s`;
+        this.game.ui.objectiveHint = `Hold - ${Math.ceil(step.duration - d.elapsed)}s`;
       }
       if (d.waveTimer <= 0 && d.wavesSpawned < d.waves) {
         d.waveTimer = 10.5;
@@ -644,29 +679,26 @@ export class MissionManager {
         const guardsDead = this.entities.every((e) => !e || e.isDead);
         if (guardsDead && this.targetVehicle && player.vehicle === this.targetVehicle) {
           this.game.police.setWanted(1);
-          this.game.ui.showToast('Vipera acquired — one star of heat.', 'warning', 2.6);
+          this.game.ui.showToast('Vipera acquired - one star of heat.', 'warning', 2.6);
           this.advance();
         } else if (guardsDead && player.vehicle !== this.targetVehicle && this.stepIndex === 1) {
           this.game.ui.objectiveHint = 'Guards down. Get in the Vipera.';
         }
         break;
       }
-      case 'eliminate': {
+      case 'eliminate':
         if (this.entities.length > 0 && this.entities.every((e) => !e || e.isDead)) this.advance();
         break;
-      }
       case 'collect':
         if (dist < target.radius) {
           if (step.wanted) this.game.police.setWanted(step.wanted);
           this.game.audio.playCash();
-          this.game.ui.showToast(step.wanted ? 'Case secured — heat incoming!' : 'Crate secured.', step.wanted ? 'danger' : 'success', 2.8);
+          this.game.ui.showToast(step.wanted ? 'Case secured - heat incoming!' : 'Crate secured.', step.wanted ? 'danger' : 'success', 2.8);
           this.advance();
         }
         break;
       case 'destroy_convoy':
-        break;
       case 'chase_vehicle':
-        break;
       case 'defend':
         break;
       case 'deliver_vehicle':
@@ -678,20 +710,18 @@ export class MissionManager {
           }
         }
         break;
-      case 'deliver': {
+      case 'deliver':
         if (dist < target.radius) {
           if (step.escape) this.game.police.clearWanted();
           this.advance();
         }
         break;
-      }
-      case 'boss_fight': {
+      case 'boss_fight':
         if (this.boss && this.boss.isDead) {
           this.game.police.setWanted(4);
           this.advance();
         }
         break;
-      }
       default:
         break;
     }
@@ -724,7 +754,7 @@ export class MissionManager {
       this.complete();
     } else {
       this.game.audio.playPickup();
-      this.game.ui.showToast(`Checkpoint — step ${this.stepIndex + 1} of ${def.steps.length}.`, 'success', 2.2);
+      this.game.ui.showToast(`Checkpoint - step ${this.stepIndex + 1} of ${def.steps.length}.`, 'success', 2.2);
       this.setupStep();
       this.game.autosave();
     }
@@ -736,7 +766,7 @@ export class MissionManager {
     this.active = false;
     this.completedCount = Math.max(this.completedCount, this.currentIndex + 1);
     this.game.player.money += reward;
-    this.game.player.score += 400 + this.currentIndex * 250;
+    this.game.player.score += 450 + this.currentIndex * 260;
     this.clearActors();
     this.currentIndex += 1;
     this.stepIndex = 0;
@@ -765,3 +795,5 @@ function clampInt(value, min, max) {
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, Math.round(n)));
 }
+
+export { CAST, MISSIONS };

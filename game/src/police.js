@@ -1,9 +1,8 @@
-// Leonida Heat - the heat ladder.
-// Cruisers chase by sight, foot officers deploy and sweep search cones, and
-// the response escalates with stars: more units, interceptors, roadblocks and
-// a manhunt. Breaking line of sight starts a search and a slow cool-down that
-// drops one star at a time. Standing still while an officer closes in fills the
-// busted meter.
+// Leonida Heat v3 - the heat ladder.
+// Cruisers chase by sight and try to pit the player; foot officers deploy,
+// sweep a search grid and use cover; roadblocks appear at three stars. Losing
+// line of sight starts a search and a slow cool-down that drops one star at a
+// time. Standing still while an officer closes in fills the busted meter.
 
 import { Vehicle } from './entities.js';
 import { WANTED_CONFIG } from './config.js';
@@ -20,13 +19,13 @@ export class FootCop {
     this.vy = 0;
     this.angle = 0;
     this.facing = 0;
-    this.health = 62;
-    this.maxHealth = 62;
+    this.health = 68;
+    this.maxHealth = 68;
     this.isDead = false;
     this.fireTimer = 0.8 + Math.random();
     this.hitFlash = 0;
     this.radius = 13;
-    this.speed = 156;
+    this.speed = 160;
     this.isCop = true;
     this.searchPhase = Math.random() * Math.PI * 2;
     this.state = 'chase';
@@ -34,7 +33,10 @@ export class FootCop {
     this.moving = false;
     this.aimTimer = 0;
     this.coverTimer = 0;
+    this.coverPoint = null;
+    this.crouched = false;
     this.name = 'Patrol Officer';
+    this.lastSeen = null;
   }
 
   takeDamage(amount, particles, audio) {
@@ -48,6 +50,10 @@ export class FootCop {
       this.vy = 0;
       if (particles) particles.spawnCash(this.x, this.y, 70 + Math.floor(Math.random() * 70));
       if (audio) audio.playBodyFall();
+    } else if (this.health < this.maxHealth * 0.5) {
+      this.state = 'cover';
+      this.coverTimer = 1.6;
+      this.coverPoint = null;
     }
   }
 }
@@ -77,6 +83,8 @@ export class PoliceManager {
     this.alertPulse = 0;
     this.response = 'CLEAR';
     this.spawnedThisResponse = 0;
+    this.sirensUp = false;
+    this.pursuitTime = 0;
   }
 
   get level() {
@@ -93,6 +101,7 @@ export class PoliceManager {
       this.footDispatchTimer = Math.min(this.footDispatchTimer, 2);
       this.alertPulse = 1;
       this.response = WANTED_CONFIG.levels[next].response;
+      this.pursuitTime = 0;
     }
     this.wantedStars = next;
     if (next === 0) this.clearWanted();
@@ -113,6 +122,7 @@ export class PoliceManager {
     this.evasion = 0;
     this.lastKnown = null;
     this.response = 'CLEAR';
+    this.sirensUp = false;
     for (const c of this.cops) c.sirenActive = false;
     for (const c of this.roadblocks) c.sirenActive = false;
   }
@@ -139,19 +149,20 @@ export class PoliceManager {
       for (let i = this.cops.length - 1; i >= 0; i -= 1) {
         const c = this.cops[i];
         c.sirenActive = false;
-        c.update(dt, this.city, particleSys, audio);
+        c.update(dt, this.city, particleSys, audio, { wetness: game?.weather?.wetness || 0 });
         if (Math.hypot(c.x - player.x, c.y - player.y) > 1100) this.cops.splice(i, 1);
       }
       this.footCops = this.footCops.filter((f) => !f.isDead || Math.hypot(f.x - player.x, f.y - player.y) < 1200);
       for (const b of this.roadblocks) b.update(dt, this.city, particleSys, audio);
       this.roadblocks = this.roadblocks.filter((b) => Math.hypot(b.x - player.x, b.y - player.y) < 1300);
       if (audio) audio.setPoliceSiren(false, 0);
+      this.sirensUp = false;
       return;
     }
 
     const cfg = this.level;
+    this.pursuitTime += dt;
 
-    // Sight: a cone, not omniscience.
     let sight = false;
     let nearestDist = Infinity;
     for (const c of this.cops) {
@@ -180,7 +191,7 @@ export class PoliceManager {
       this.evasion = 0;
       this.cooldownTimer = WANTED_CONFIG.cooldownTime;
       this.searchCenter = { x: player.x, y: player.y };
-      this.searchRadius = 120;
+      this.searchRadius = 130;
     } else {
       this.searching = true;
       const hiddenBonus = nearestDist > 700 ? 2.2 : nearestDist > 420 ? 1.35 : 1;
@@ -193,20 +204,23 @@ export class PoliceManager {
         this.searchRadius = Math.max(90, this.searchRadius - 60);
         if (game?.ui) {
           game.ui.showToast(
-            next === 0 ? 'Heat cleared. Keep your head down.' : `Search is cooling — ${next} star${next === 1 ? '' : 's'} left.`,
+            next === 0 ? 'Heat cleared. Keep your head down.' : `Search is cooling - ${next} star${next === 1 ? '' : 's'} left.`,
             next === 0 ? 'success' : 'neutral',
             2.8,
           );
         }
-        this.setWanted(next);
-        if (next === 0) return;
+        if (next === 0) {
+          this.clearWanted();
+          return;
+        }
+        this.response = WANTED_CONFIG.levels[next].response;
       }
     }
 
+    this.sirensUp = this.wantedStars > 0;
     if (audio) audio.setPoliceSiren(true, this.wantedStars);
     if (this.wantedStars >= 2 && sight) this.bustedArmed = true;
 
-    // Dispatch cruisers.
     this.dispatchTimer -= dt;
     const liveCops = this.cops.filter((c) => !c.isDestroyed).length;
     if (this.dispatchTimer <= 0 && liveCops < cfg.maxCops) {
@@ -214,7 +228,6 @@ export class PoliceManager {
       this.spawnCruiser(player);
     }
 
-    // Foot officers.
     this.footDispatchTimer -= dt;
     const liveFoot = this.footCops.filter((f) => !f.isDead).length;
     if (this.footDispatchTimer <= 0 && liveFoot < cfg.maxFoot) {
@@ -223,7 +236,6 @@ export class PoliceManager {
       if (!player.isInVehicle || this.deployTimer % 2 === 0) this.spawnFootCop(player);
     }
 
-    // Cruiser pursuit.
     for (let i = this.cops.length - 1; i >= 0; i -= 1) {
       const cop = this.cops[i];
       if (cop.isDestroyed) {
@@ -232,7 +244,7 @@ export class PoliceManager {
       }
       cop.sirenActive = true;
       this.pursue(cop, player, dt, particleSys, audio, game, sight);
-      cop.update(dt, this.city, particleSys, audio);
+      cop.update(dt, this.city, particleSys, audio, { wetness: game?.weather?.wetness || 0 });
       if (Math.hypot(cop.x - player.x, cop.y - player.y) > 1950) this.cops.splice(i, 1);
       if (sight && player.isInVehicle && player.vehicle && Math.hypot(cop.x - player.x, cop.y - player.y) < 76) {
         const impact = Math.hypot(cop.vx - player.vehicle.vx, cop.vy - player.vehicle.vy);
@@ -243,7 +255,6 @@ export class PoliceManager {
       }
     }
 
-    // Roadblocks.
     this.roadblockTimer -= dt;
     if (cfg.roadblocks && this.roadblockTimer <= 0 && this.roadblocks.filter((b) => !b.isDestroyed).length < 4) {
       this.roadblockTimer = this.wantedStars >= 4 ? 9 : 13;
@@ -255,39 +266,72 @@ export class PoliceManager {
     }
     this.roadblocks = this.roadblocks.filter((b) => Math.hypot(b.x - player.x, b.y - player.y) < 1600);
 
-    // Foot pursuit and search sweeps.
+    this.updateFootCops(dt, player, sight, game, particleSys, audio, cfg);
+    this.updateBusted(dt, player, game);
+  }
+
+  updateFootCops(dt, player, sight, game, particles, audio, cfg) {
     for (const cop of this.footCops) {
       if (cop.isDead) continue;
       cop.hitFlash = Math.max(0, cop.hitFlash - dt * 3);
-      const los = this.city.hasLineOfSight(cop.x, cop.y, player.x, player.y, 540);
-      let targetX = player.x;
-      let targetY = player.y;
-      if (!los && this.lastKnown) {
-        const dk = Math.hypot(this.lastKnown.x - cop.x, this.lastKnown.y - cop.y);
-        if (dk < 52) {
-          targetX = this.lastKnown.x + Math.cos(cop.searchPhase + this.cooldownTimer * 0.4) * 95;
-          targetY = this.lastKnown.y + Math.sin(cop.searchPhase + this.cooldownTimer * 0.4) * 95;
+      const dist = Math.hypot(player.x - cop.x, player.y - cop.y);
+      const los = this.city.hasLineOfSight(cop.x, cop.y, player.x, player.y, 560);
+
+      if (cop.state === 'cover' && cop.coverTimer > 0) {
+        cop.coverTimer -= dt;
+        if (!cop.coverPoint) cop.coverPoint = this.findCover(cop, player);
+        if (cop.coverPoint) {
+          const dx = cop.coverPoint.x - cop.x;
+          const dy = cop.coverPoint.y - cop.y;
+          const d = Math.hypot(dx, dy);
+          if (d > 12) {
+            cop.vx = (dx / d) * cop.speed * 0.9;
+            cop.vy = (dy / d) * cop.speed * 0.9;
+            cop.moving = true;
+            cop.walkPhase += dt * 11;
+          } else {
+            cop.vx = 0;
+            cop.vy = 0;
+            cop.moving = false;
+            cop.crouched = true;
+          }
+        }
+        if (cop.coverTimer <= 0) {
+          cop.state = 'chase';
+          cop.crouched = false;
+          cop.coverPoint = null;
+        }
+      } else {
+        let targetX = player.x;
+        let targetY = player.y;
+        if (!los && this.lastKnown) {
+          const dk = Math.hypot(this.lastKnown.x - cop.x, this.lastKnown.y - cop.y);
+          if (dk < 52) {
+            targetX = this.lastKnown.x + Math.cos(cop.searchPhase + this.cooldownTimer * 0.4) * 95;
+            targetY = this.lastKnown.y + Math.sin(cop.searchPhase + this.cooldownTimer * 0.4) * 95;
+          } else {
+            targetX = this.lastKnown.x;
+            targetY = this.lastKnown.y;
+          }
+        }
+        const dx = targetX - cop.x;
+        const dy = targetY - cop.y;
+        const d = Math.hypot(dx, dy);
+        cop.angle = Math.atan2(dy, dx);
+        cop.facing = cop.angle > -Math.PI / 4 && cop.angle <= Math.PI / 4 ? 3 : cop.angle > Math.PI / 4 && cop.angle <= (Math.PI * 3) / 4 ? 0 : cop.angle > -(Math.PI * 3) / 4 && cop.angle <= -Math.PI / 4 ? 2 : 1;
+        if (d > 46 && d < 780) {
+          const speed = cop.speed + this.wantedStars * 9;
+          cop.vx = (dx / d) * speed;
+          cop.vy = (dy / d) * speed;
+          cop.moving = true;
+          cop.walkPhase += dt * 11;
         } else {
-          targetX = this.lastKnown.x;
-          targetY = this.lastKnown.y;
+          cop.vx *= Math.exp(-10 * dt);
+          cop.vy *= Math.exp(-10 * dt);
+          cop.moving = false;
         }
       }
-      const dx = targetX - cop.x;
-      const dy = targetY - cop.y;
-      const dist = Math.hypot(dx, dy);
-      cop.angle = Math.atan2(dy, dx);
-      cop.facing = cop.angle > -Math.PI / 4 && cop.angle <= Math.PI / 4 ? 3 : cop.angle > Math.PI / 4 && cop.angle <= (Math.PI * 3) / 4 ? 0 : cop.angle > -(Math.PI * 3) / 4 && cop.angle <= -Math.PI / 4 ? 2 : 1;
-      if (dist > 46 && dist < 780) {
-        const speed = cop.speed + this.wantedStars * 9;
-        cop.vx = (dx / dist) * speed;
-        cop.vy = (dy / dist) * speed;
-        cop.moving = true;
-        cop.walkPhase += dt * 11;
-      } else {
-        cop.vx *= Math.exp(-10 * dt);
-        cop.vy *= Math.exp(-10 * dt);
-        cop.moving = false;
-      }
+
       const nx = cop.x + cop.vx * dt;
       const ny = cop.y + cop.vy * dt;
       const hit = this.city.collideCircle(nx, ny, cop.radius);
@@ -300,24 +344,51 @@ export class PoliceManager {
       }
 
       cop.fireTimer -= dt;
-      if (cfg.enforcersFire && los && Math.hypot(player.x - cop.x, player.y - cop.y) < 380 && cop.fireTimer <= 0) {
-        const distToPlayer = Math.hypot(player.x - cop.x, player.y - cop.y);
+      const canShoot = cfg.enforcersFire && sight && los && dist < 390 && cop.fireTimer <= 0;
+      if (canShoot) {
         const aim = Math.atan2(player.y - cop.y, player.x - cop.x);
-        const spread = 0.06 + distToPlayer / 6000 + (player.isInVehicle ? 0.05 : 0);
+        const spread = 0.06 + dist / 6000 + (player.isInVehicle ? 0.05 : 0);
         const shots = this.wantedStars >= 4 ? 2 : 1;
         for (let s = 0; s < shots; s += 1) {
           const a = aim + (Math.random() - 0.5) * spread * 2;
           game.combat.fireBullet(cop.x + Math.cos(a) * 17, cop.y + Math.sin(a) * 17, a, { speed: 1120, damage: 12, range: 390 }, 'cop');
-          if (particleSys) particleSys.spawnMuzzle(cop.x + Math.cos(a) * 17, cop.y + Math.sin(a) * 17, a, 6);
+          if (particles) particles.spawnMuzzle(cop.x + Math.cos(a) * 17, cop.y + Math.sin(a) * 17, a, 6);
         }
         if (audio) audio.playGunshot('pistol', 0.46);
         cop.fireTimer = 1.45 + Math.random() * 0.9;
       }
     }
     this.footCops = this.footCops.filter((f) => !f.isDead || Math.hypot(f.x - player.x, f.y - player.y) < 1400);
+  }
 
-    // Busted meter.
-    const playerSpeed = player.isInVehicle
+  findCover(cop, player) {
+    let best = null;
+    let bestScore = -Infinity;
+    for (const col of this.city.getColliders(cop.x, cop.y, 220)) {
+      if (col.type !== 'building') continue;
+      const corners = [
+        { x: col.x + col.w / 2 + 20, y: col.y - col.h / 2 - 20 },
+        { x: col.x - col.w / 2 - 20, y: col.y - col.h / 2 - 20 },
+        { x: col.x + col.w / 2 + 20, y: col.y + col.h / 2 + 20 },
+        { x: col.x - col.w / 2 - 20, y: col.y + col.h / 2 + 20 },
+      ];
+      for (const c of corners) {
+        if (this.city.pointBlocked(c.x, c.y, 14)) continue;
+        const d = Math.hypot(c.x - cop.x, c.y - cop.y);
+        if (d > 260) continue;
+        const hiding = this.city.hasLineOfSight(c.x, c.y, player.x, player.y, 500) ? -90 : 120;
+        const score = hiding - d * 0.3;
+        if (score > bestScore) {
+          bestScore = score;
+          best = c;
+        }
+      }
+    }
+    return best;
+  }
+
+  updateBusted(dt, player, game) {
+    const playerSpeed = player.isInVehicle && player.vehicle
       ? Math.hypot(player.vehicle.vx, player.vehicle.vy)
       : Math.hypot(player.vx, player.vy);
     let closeCop = false;
@@ -331,7 +402,7 @@ export class PoliceManager {
     }
     if (closeCop && playerSpeed < 32 && this.wantedStars > 0) {
       this.bustedProgress += dt;
-      if (this.bustedProgress > 1.2 && !game.bustedTriggered) game.onBusted();
+      if (this.bustedProgress > WANTED_CONFIG.bustedTime && !game.bustedTriggered) game.onBusted();
     } else {
       this.bustedProgress = Math.max(0, this.bustedProgress - dt * 1.7);
     }
@@ -360,12 +431,12 @@ export class PoliceManager {
     const dx = targetX - cop.x;
     const dy = targetY - cop.y;
     const dist = Math.hypot(dx, dy);
-    if (dist > 1300) {
+    if (dist > 1320) {
       cop.steer(0);
       cop.accelerate(0.55, dt);
       return;
     }
-    const lead = sight && player.isInVehicle ? 0.26 : 0.1;
+    const lead = sight && player.isInVehicle ? 0.28 : 0.1;
     const aimX = sight ? player.x + (player.vx || 0) * lead : targetX;
     const aimY = sight ? player.y + (player.vy || 0) * lead : targetY;
     const desired = Math.atan2(aimY - cop.y, aimX - cop.x);
@@ -375,12 +446,12 @@ export class PoliceManager {
     cop.steer(Math.max(-1, Math.min(1, diff * 2.7)));
 
     if (dist > 126) {
-      cop.accelerate(sight && this.wantedStars >= 4 ? 1 : 0.76, dt);
+      cop.accelerate(sight && this.wantedStars >= 4 ? 1 : 0.78, dt);
     } else {
       cop.brake(1, dt);
       cop.accelerate(0.22, dt);
     }
-    if (sight && player.isInVehicle && dist < 64) {
+    if (sight && player.isInVehicle && dist < 70) {
       cop.accelerate(1, dt);
       player.vehicle.takeDamage((this.wantedStars >= 3 ? 26 : 12) * dt, particles, audio);
       game.camera.shake = Math.max(game.camera.shake, 0.18);
@@ -433,7 +504,7 @@ export class PoliceManager {
   }
 
   spawnRoadblock(player) {
-    const a = player.isInVehicle ? player.vehicle.angle : Math.atan2(player.vy, player.vx);
+    const a = player.isInVehicle && player.vehicle ? player.vehicle.angle : Math.atan2(player.vy, player.vx);
     const dist = 470;
     const x = player.x + Math.cos(a) * dist;
     const y = player.y + Math.sin(a) * dist;
@@ -473,3 +544,5 @@ export class PoliceManager {
     this.clearWanted();
   }
 }
+
+export { range };

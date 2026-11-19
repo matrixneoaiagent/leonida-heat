@@ -1,7 +1,8 @@
 // A small static server for game/ (Node standard library only).
 // `node serve.ts --port 8080` serves the playable folder on 127.0.0.1. It is a
 // development convenience: it serves only game/, refuses path escapes, handles
-// HEAD and byte ranges for large files, and never lists directories.
+// HEAD, byte ranges and conditional requests, never lists directories, and
+// adds the headers a static offline game should have.
 
 import { createReadStream, statSync } from 'node:fs';
 import { createServer, type ServerResponse } from 'node:http';
@@ -26,7 +27,17 @@ function readPort(): number {
   return 8080;
 }
 
+function readHost(): string {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--host' && argv[i + 1]) return argv[i + 1];
+    if (arg.startsWith('--host=')) return arg.slice(7);
+  }
+  return '127.0.0.1';
+}
+
 const port = readPort();
+const host = readHost();
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -52,8 +63,14 @@ const MIME: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'cross-origin-opener-policy': 'same-origin',
+};
+
 function sendText(response: ServerResponse, status: number, text: string): void {
-  response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+  response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', ...SECURITY_HEADERS });
   response.end(text);
 }
 
@@ -93,14 +110,21 @@ const server = createServer((request, response) => {
     return;
   }
 
+  const etag = `"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`;
+  if (request.headers['if-none-match'] === etag) {
+    response.writeHead(304, { etag, 'cache-control': 'no-store', ...SECURITY_HEADERS });
+    response.end();
+    return;
+  }
+
   const headers: Record<string, string | number> = {
     'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
     'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
+    etag,
     'accept-ranges': 'bytes',
+    ...SECURITY_HEADERS,
   };
 
-  // Byte ranges are useful for large assets and harmless for the rest.
   const range = request.headers.range;
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range);
@@ -140,8 +164,9 @@ server.on('error', (error: NodeJS.ErrnoException) => {
   process.exitCode = 1;
 });
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`Leonida Heat is on http://localhost:${port} (serving ${root})`);
+server.listen(port, host, () => {
+  console.log(`Leonida Heat is on http://${host}:${port} (serving ${root})`);
+  console.log('Press Ctrl+C to stop. The game makes no network requests at runtime.');
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

@@ -618,9 +618,9 @@ export class Player {
 // =====================================================================
 // Pedestrian
 // =====================================================================
-const SHIRTS = ['#e8556f', '#2fb8c6', '#f1c94b', '#57a86a', '#f18a44', '#f4f1e8', '#2b2a33', '#8c6cc9'];
-const PANTS = ['#3a4a7a', '#58646b', '#6f5440', '#26262c', '#9a9a9a', '#43576a'];
-const SKIN = ['#f2c39b', '#dda578', '#b87b52', '#8a5a3b', '#f6d3b3'];
+const SHIRTS = ['#b45b67', '#4c8f94', '#b7a552', '#618668', '#b17a50', '#cfc7b8', '#3b3942', '#7d6c8f'];
+const PANTS = ['#3b4a63', '#556069', '#66513f', '#2c2c32', '#898887', '#455767'];
+const SKIN = ['#e2b58e', '#c99366', '#a87048', '#82563a', '#e6c3a2'];
 
 export class Pedestrian {
   constructor(x, y, rng = Math.random, lane = null) {

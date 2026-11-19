@@ -339,7 +339,7 @@ export class Game {
     this.updateCamera(dt);
     this.ui.update(dt, this);
     this.updateDistrict();
-    if (playingStates.includes(this.state)) {
+    if (this.state === 'playing' || this.state === 'dialogue') {
       this.prompt = this.computePrompt();
     } else {
       this.prompt = '';

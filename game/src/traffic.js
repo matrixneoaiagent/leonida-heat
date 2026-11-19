@@ -31,7 +31,7 @@ export class TrafficManager {
     const p = this.lanePoint(road, progress, direction);
     if (p.x < 30 || p.x > 2660 || p.y < 30 || p.y > 3170) return null;
     if (this.city.pointBlocked(p.x, p.y, 26)) return null;
-    if (this.vehicles.some((v) => Math.hypot(v.x - p.x, v.y - p.y) < 78)) return null;
+    if (this.vehicles.some((v) => Math.hypot(v.x - p.x, v.y - p.y) < 112)) return null;
     const id = archetype || pick(this.rng, CIVILIAN_VEHICLES);
     const car = new Vehicle(id, p.x, p.y, p.angle);
     car.aiMode = 'traffic';
@@ -149,20 +149,23 @@ export class TrafficManager {
     const fx = Math.cos(v.angle);
     const fy = Math.sin(v.angle);
     let brake = false;
-    let avoidX = 0;
-    let avoidY = 0;
+    let emergency = 0;
+    let redDist = Infinity;
+    let aheadRef = null;
+    let aheadDist = Infinity;
 
-    // Car ahead in the same lane.
+    // Keep a clean gap to the vehicle ahead.
     for (const other of this.vehicles) {
       if (other === v || other.isDestroyed) continue;
       const dx = other.x - v.x;
       const dy = other.y - v.y;
       const forwardDist = dx * fx + dy * fy;
       const sideDist = Math.abs(-dx * fy + dy * fx);
-      if (forwardDist > 0 && forwardDist < 62 && sideDist < 26) {
+      if (forwardDist > 0 && forwardDist < 118 && sideDist < 30) {
         brake = true;
-        avoidX -= Math.sin(v.angle);
-        avoidY += Math.cos(v.angle);
+        emergency = Math.max(emergency, forwardDist < 86 ? 2 : 1);
+        aheadRef = other;
+        aheadDist = forwardDist;
         break;
       }
     }
@@ -171,18 +174,48 @@ export class TrafficManager {
       const dy = player.vehicle.y - v.y;
       const fd = dx * fx + dy * fy;
       const sd = Math.abs(-dx * fy + dy * fx);
-      if (fd > 0 && fd < 70 && sd < 30) brake = true;
+      if (fd > 0 && fd < 122 && sd < 30) {
+        brake = true;
+        emergency = Math.max(emergency, fd < 90 ? 2 : 1);
+        aheadRef = player.vehicle;
+        aheadDist = fd;
+      }
     }
 
-    // Red light ahead.
-    if (!brake) {
-      for (const light of this.city.trafficLights) {
-        const dx = light.x - v.x;
-        const dy = light.y - v.y;
-        const fd = dx * fx + dy * fy;
-        const dist = Math.hypot(dx, dy);
-        if (light.state === 'red' && fd > 0 && fd < 52 && dist < 70) {
-          brake = true;
+    // Red light: stop before the crosswalk, never on it. The shared light at
+    // each intersection is staggered when the city is generated.
+    if (v.road) {
+      for (const inter of this.city.intersections) {
+        const light = inter.light;
+        if (!light || light.state !== 'red') continue;
+        let stopDist = 0;
+        let d = 0;
+        const nose = v.length / 2 + 66;
+        if (v.road.horizontal) {
+          if (Math.abs(inter.y - v.road.y1) > 2) continue;
+          if (v.direction > 0) {
+            stopDist = inter.x - inter.vWidth / 2 - nose;
+            d = stopDist - v.x;
+          } else {
+            stopDist = inter.x + inter.vWidth / 2 + nose;
+            d = v.x - stopDist;
+          }
+        } else {
+          if (Math.abs(inter.x - v.road.x1) > 2) continue;
+          if (v.direction > 0) {
+            stopDist = inter.y - inter.hWidth / 2 - nose;
+            d = stopDist - v.y;
+          } else {
+            stopDist = inter.y + inter.hWidth / 2 + nose;
+            d = v.y - stopDist;
+          }
+        }
+        if (d > 0 && d < 150) {
+          redDist = Math.min(redDist, d);
+          break;
+        }
+        if (d <= 0 && d > -160) {
+          // Already crossing; clear the junction rather than stopping in it.
           break;
         }
       }
@@ -204,8 +237,41 @@ export class TrafficManager {
       v.steer(0);
     }
 
-    if (brake) {
-      v.brake(0.8, dt);
+    // A stopped queue keeps at least a bumper's gap, never overlapping.
+    if (aheadRef) {
+      const minGap = (v.length + aheadRef.length) / 2 + 32;
+      if (aheadDist < minGap) {
+        const overlap = minGap - aheadDist;
+        v.x -= fx * overlap;
+        v.y -= fy * overlap;
+        v.vx *= 0.2;
+        v.vy *= 0.2;
+      }
+    }
+
+    if (redDist < Infinity && !aheadRef) {
+      // Creep up to the line instead of stopping a bus length early.
+      const cap = Math.max(0, redDist * 1.9 - 4);
+      if (v.speed > cap) {
+        const f = v.speed;
+        if (f > cap) {
+          v.vx -= fx * (f - cap);
+          v.vy -= fy * (f - cap);
+        }
+        v.brake(0.7, dt);
+      } else if (redDist > 8) {
+        v.accelerate(0.16, dt);
+      } else {
+        v.vx *= Math.exp(-9 * dt);
+        v.vy *= Math.exp(-9 * dt);
+      }
+      v.honkTimer = 0;
+    } else if (brake) {
+      v.brake(emergency === 2 ? 1 : 0.8, dt);
+      if (emergency === 2) {
+        v.vx *= Math.exp(-7 * dt);
+        v.vy *= Math.exp(-7 * dt);
+      }
       v.honkTimer += dt;
       if (v.honkTimer > 2.8 && this.honkCooldown <= 0) {
         this.honkCooldown = 1.3;

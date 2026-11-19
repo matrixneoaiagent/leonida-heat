@@ -33,6 +33,9 @@ export class CityWorld {
     this.piers = [];
     this.parkingSpots = [];
     this.sandSpecks = [];
+    this.roadPatches = [];
+    this.roadCracks = [];
+    this.foamDots = [];
     this.skidMarks = [];
     this.billboards = [];
 
@@ -103,6 +106,7 @@ export class CityWorld {
   generate() {
     this.generateWaterAndBeaches();
     this.generateRoadNetwork();
+    this.generateRoadDecoration();
     this.generateBlocks();
     this.generateBuildings();
     this.addLandmarkBuildings();
@@ -162,13 +166,14 @@ export class CityWorld {
           const inY = hr.y1 >= Math.min(vr.y1, vr.y2) && hr.y1 <= Math.max(vr.y1, vr.y2);
           if (inX && inY) {
             const size = Math.max(hr.width, vr.width);
+            const index = this.intersections.length;
             const light = {
               x: vr.x1 + vr.width / 2 + 16,
               y: hr.y1 - hr.width / 2 - 16,
-              state: 'green',
-              timer: this.rng() * 6,
-              greenFor: 5.2,
-              redFor: 5.6,
+              state: index % 3 === 0 ? 'red' : 'green',
+              timer: (index % 7) * 0.83 + this.rng() * 0.9,
+              greenFor: 4.6 + (index % 4) * 0.35,
+              redFor: 4.8 + (index % 5) * 0.3,
               x0: vr.x1,
               y0: hr.y1,
             };
@@ -180,12 +185,58 @@ export class CityWorld {
               vWidth: vr.width,
               horizontalName: hr.name,
               verticalName: vr.name,
+              light,
             });
             this.trafficLights.push(light);
           }
         }
       });
     });
+  }
+
+  generateRoadDecoration() {
+    for (const road of this.roads) {
+      const len = Math.hypot(road.x2 - road.x1, road.y2 - road.y1);
+      const count = Math.max(3, Math.floor(len / 260));
+      for (let i = 0; i < count; i += 1) {
+        const t = range(this.rng, 0.03, 0.97);
+        const x = road.x1 + (road.x2 - road.x1) * t;
+        const y = road.y1 + (road.y2 - road.y1) * t;
+        if (this.nearIntersection(x, y, 90)) continue;
+        const along = range(this.rng, 22, 86);
+        const across = range(this.rng, 5, 18);
+        this.roadPatches.push({
+          x, y,
+          w: road.horizontal ? along : across,
+          h: road.horizontal ? across : along,
+          angle: range(this.rng, -0.06, 0.06),
+          light: this.rng() > 0.55,
+          alpha: range(this.rng, 0.12, 0.28),
+        });
+      }
+      const crackCount = Math.max(2, Math.floor(len / 520));
+      for (let i = 0; i < crackCount; i += 1) {
+        const t = range(this.rng, 0.05, 0.95);
+        const x = road.x1 + (road.x2 - road.x1) * t;
+        const y = road.y1 + (road.y2 - road.y1) * t;
+        if (this.nearIntersection(x, y, 90)) continue;
+        const points = [];
+        let px = x;
+        let py = y;
+        const steps = 4 + Math.floor(this.rng() * 4);
+        for (let s = 0; s < steps; s += 1) {
+          points.push({ x: px, y: py });
+          if (road.horizontal) {
+            px += range(this.rng, -8, 8);
+            py += range(this.rng, 8, 20) * (this.rng() > 0.5 ? 1 : -1);
+          } else {
+            px += range(this.rng, 8, 20) * (this.rng() > 0.5 ? 1 : -1);
+            py += range(this.rng, -8, 8);
+          }
+        }
+        this.roadCracks.push({ points, alpha: range(this.rng, 0.12, 0.24) });
+      }
+    }
   }
 
   generateBlocks() {
@@ -372,7 +423,8 @@ export class CityWorld {
           type: 'lowrise',
           neonText: this.rng() > 0.7 ? pick(this.rng, shopNames) : null,
           neonColor: pick(this.rng, ['#ff7fa5', '#5ce1e6', '#ffd166']),
-          awning: this.rng() > 0.5,
+          awning: this.rng() > 0.35,
+          awningColor: pick(this.rng, ['#c45a5a', '#3e8585', '#c4953d', '#557ea3', '#a45b78']),
           windows: 3,
         });
       }
@@ -413,7 +465,7 @@ export class CityWorld {
     this.buildings.push({
       x: L.diner.x, y: L.diner.y, w: 96, h: 74, height: 22,
       color: '#f7e3cf', roofColor: '#d96a57', type: 'landmark',
-      neonText: 'PELICAN GRILL', neonColor: '#ff7f9e', awning: true, windows: 4,
+      neonText: 'PELICAN GRILL', neonColor: '#ff7f9e', awning: true, awningColor: '#cf6a6a', windows: 4,
     });
     this.buildings.push({
       x: L.chopShop.x, y: L.chopShop.y, w: 158, h: 104, height: 24,
@@ -558,6 +610,17 @@ export class CityWorld {
         r: range(this.rng, 0.6, 2.2),
         a: range(this.rng, 0.08, 0.22),
       });
+    }
+    for (let y = 4; y < 3200; y += 13) {
+      const clusters = 1 + Math.floor(this.rng() * 3);
+      for (let c = 0; c < clusters; c += 1) {
+        this.foamDots.push({
+          x: range(this.rng, 2700, 2726),
+          y: y + range(this.rng, -6, 6),
+          r: range(this.rng, 0.8, 2.6),
+          a: range(this.rng, 0.18, 0.5),
+        });
+      }
     }
   }
 

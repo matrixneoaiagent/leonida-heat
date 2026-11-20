@@ -1,134 +1,96 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
+/* LEONIDA HEAT 3D — boot. */
+(function () {
+  'use strict';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
-
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
-
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
-
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
+  function fatal(message, detail) {
+    var box = document.createElement('div');
+    box.id = 'fatal-error';
+    box.style.cssText = 'position:fixed;inset:0;z-index:9999;display:grid;place-items:center;padding:40px;background:#070b11;color:#f7ecd6;font-family:Arial Narrow,Arial,sans-serif;text-align:center';
+    var inner = document.createElement('div');
+    inner.style.cssText = 'max-width:560px;border:1px solid rgba(255,111,97,.5);padding:28px;background:rgba(10,17,24,.9)';
+    inner.innerHTML = '<div style="font-size:10px;letter-spacing:.3em;color:#ff6f61">LEONIDA HEAT 3D</div>' +
+      '<h1 style="font-family:Impact,Arial Black,sans-serif;font-weight:400;letter-spacing:.05em;font-size:42px;margin:8px 0 12px">UNABLE TO START</h1>' +
+      '<p style="font-size:13px;line-height:1.6;color:#b9c5cc;margin:0 0 14px"></p>' +
+      '<p style="font-family:Consolas,monospace;font-size:10px;color:#7f909a;margin:0"></p>';
+    inner.querySelector('p').textContent = message;
+    inner.querySelectorAll('p')[1].textContent = detail || '';
+    box.appendChild(inner);
+    document.body.appendChild(box);
   }
 
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
+  function boot() {
+    var canvas = document.getElementById('gameCanvas');
+    if (!canvas) {
+      fatal('The game canvas is missing from the page.');
       return;
     }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
+    if (!window.THREE) {
+      fatal('Three.js did not load.', 'Expected vendor/three.min.js to define the global THREE.');
+      return;
+    }
+    if (!window.LH || !LH.Game) {
+      fatal('The game modules did not load.', 'Check that every classic script in index.html is present.');
+      return;
+    }
 
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
+    var game;
+    try {
+      game = new LH.Game(canvas);
+    } catch (err) {
+      console.error('[Leonida] boot failed', err);
+      fatal('The game could not initialise.', String(err && err.message ? err.message : err));
+      return;
+    }
+
+    window.__game = game;
+    window.__game.shotReady = false;
+
+    if (game.state === 'title') game.showTitle();
+
+    window.addEventListener('resize', function () {
+      game.resize();
+    }, { passive: true });
+
+    window.addEventListener('orientationchange', function () {
+      setTimeout(function () { game.resize(); }, 120);
+    }, { passive: true });
+
+    document.addEventListener('visibilitychange', function () {
+      game.lastTime = 0;
+      if (document.hidden && game.state === 'play') {
+        game.togglePause();
       }
-    } else {
-      accumulator = 0;
+    });
+
+    var unlocked = false;
+    function unlockAudio() {
+      if (unlocked) return;
+      unlocked = true;
+      if (game.audio && game.audio.unlock) {
+        try { game.audio.unlock(); } catch (e) { /* audio is optional */ }
+      }
+      window.removeEventListener('pointerdown', unlockAudio, true);
+      window.removeEventListener('keydown', unlockAudio, true);
     }
-    renderer.draw(world.state, screen, best);
+    window.addEventListener('pointerdown', unlockAudio, true);
+    window.addEventListener('keydown', unlockAudio, true);
+
+    canvas.addEventListener('click', function () {
+      if (game.state === 'play' && game.input) game.input.requestLock();
+    });
+
+    window.addEventListener('error', function (event) {
+      if (event && event.message) console.warn('[Leonida] runtime error:', event.message);
+    });
+
+    if (game.shotName) {
+      document.body.classList.add('is-shot');
+    }
   }
 
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
-  requestAnimationFrame(frame);
-}
-
-if (shot) runShot(shot);
-else runGame();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
+}());

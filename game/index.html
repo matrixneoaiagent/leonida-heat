@@ -3,17 +3,449 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
-<style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-</style>
+<meta name="theme-color" content="#0b0e14">
+<title>Leonida Heat 3D — Costa Sol</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%230b0e14'/%3E%3Ctext x='32' y='44' font-family='Arial Black,Arial' font-size='34' font-weight='900' text-anchor='middle' fill='%23ff6f61'%3ELH%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
-<script type="module" src="./src/main.js"></script>
+
+<canvas id="gameCanvas" width="1280" height="720" aria-label="Leonida Heat 3D game view"></canvas>
+
+<!-- ============================= HUD ============================= -->
+<div id="hud" aria-live="off">
+
+  <!-- Top left: identity, vitals, cash -->
+  <section id="hud-vitals" class="hud-panel">
+    <div class="vitals-id">
+      <div class="id-badge" aria-hidden="true">LC</div>
+      <div class="id-copy">
+        <div id="player-name">LEO CALDER</div>
+        <div id="player-district" class="micro">OCEAN DRIVE · COSTA SOL</div>
+      </div>
+      <div id="district-chip" class="micro">SEASIDE</div>
+    </div>
+
+    <div class="vital-row">
+      <span class="vital-label">HEALTH</span>
+      <div class="bar-track"><div id="health-fill" class="bar-fill health"></div></div>
+      <span id="health-value" class="vital-value">100</span>
+    </div>
+    <div class="vital-row">
+      <span class="vital-label">ARMOR</span>
+      <div class="bar-track"><div id="armor-fill" class="bar-fill armor"></div></div>
+      <span id="armor-value" class="vital-value">0</span>
+    </div>
+
+    <div class="cash-row">
+      <span class="cash-sigil" aria-hidden="true">$</span>
+      <span id="money">000000</span>
+      <span id="money-delta" class="money-delta" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <!-- Top right: wanted, clock, pursuit -->
+  <section id="hud-wanted" class="hud-panel">
+    <div id="wanted-stars" class="wanted-stars" aria-label="Wanted level">
+      <span class="star" data-star="1">★</span>
+      <span class="star" data-star="2">★</span>
+      <span class="star" data-star="3">★</span>
+      <span class="star" data-star="4">★</span>
+      <span class="star" data-star="5">★</span>
+    </div>
+    <div class="clock-row">
+      <span id="clock" class="clock">18:12</span>
+      <span class="micro">DAY <b id="day-count">01</b></span>
+      <span id="weather" class="weather"><span class="weather-dot"></span>HAZE</span>
+    </div>
+    <div id="pursuit" class="pursuit"><span class="pursuit-dot"></span>NO UNITS</div>
+    <div id="heat-strip" class="heat-strip" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+  </section>
+
+  <!-- Left middle: mission + live dispatch -->
+  <aside id="mission-card" class="hud-panel" hidden>
+    <div class="mission-eyebrow">
+      <span id="mission-giver">VINNIE SALTA</span>
+      <span id="mission-timer" class="timer">01:30</span>
+    </div>
+    <h2 id="mission-title">VALET RUN</h2>
+    <p id="mission-objective">Deliver the Serata to the Ocean Hotel</p>
+    <div class="mission-progress"><div id="mission-progress-fill"></div></div>
+    <table id="dispatch-table">
+      <thead>
+        <tr><th>UNIT</th><th>DIST</th><th>STATUS</th></tr>
+      </thead>
+      <tbody id="dispatch-rows">
+        <tr><td>SQUAD 2</td><td>214 M</td><td class="st-live">EN ROUTE</td></tr>
+        <tr><td>ROADBLOCK</td><td>480 M</td><td>SET</td></tr>
+        <tr><td>MAYA</td><td>READY</td><td class="st-crew">X</td></tr>
+      </tbody>
+    </table>
+  </aside>
+
+  <!-- Dynamic objective pointer at the screen edge -->
+  <div id="objective-arrow" aria-hidden="true"><span>➤</span></div>
+
+  <!-- Bottom left: minimap -->
+  <aside id="minimap-wrap" class="hud-panel">
+    <div class="map-head">
+      <span class="map-north" id="minimap-north">N</span>
+      <span id="minimap-district">OCEAN DRIVE</span>
+      <span id="mix-tape-count" class="micro">MIX TAPES 0/10</span>
+    </div>
+    <div class="map-frame">
+      <canvas id="minimap" width="220" height="220"></canvas>
+      <div class="map-grid" aria-hidden="true"></div>
+      <div class="map-ring" aria-hidden="true"></div>
+    </div>
+    <div class="map-foot">
+      <span id="minimap-coords">X -380 · Z 220</span>
+      <span class="map-scale">1:900</span>
+    </div>
+  </aside>
+
+  <!-- Bottom right: weapon, ammo, crew abilities -->
+  <aside id="weapon-panel" class="hud-panel">
+    <div class="weapon-head">
+      <span class="micro">EQUIPPED</span>
+      <span id="weapon-slot" class="micro">1 / 5</span>
+    </div>
+    <div class="weapon-row">
+      <canvas id="weapon-icon" width="120" height="52" aria-hidden="true"></canvas>
+      <div class="weapon-copy">
+        <div id="weapon-name">PISTOL</div>
+        <div class="ammo-line"><span id="weapon-ammo">12</span><span class="ammo-sep">/</span><span id="weapon-reserve">96</span></div>
+      </div>
+    </div>
+    <div id="crew-chips" class="crew-chips">
+      <div class="crew-chip" id="crew-maya">
+        <span class="crew-key">X</span>
+        <span class="crew-name">MAYA</span>
+        <span class="crew-state">READY</span>
+        <i class="crew-cool" id="crew-maya-cool"></i>
+      </div>
+      <div class="crew-chip" id="crew-dez">
+        <span class="crew-key">C</span>
+        <span class="crew-name">DEZ</span>
+        <span class="crew-state">READY</span>
+        <i class="crew-cool" id="crew-dez-cool"></i>
+      </div>
+      <div class="crew-chip" id="crew-rook">
+        <span class="crew-key">V</span>
+        <span class="crew-name">ROOK</span>
+        <span class="crew-state">READY</span>
+        <i class="crew-cool" id="crew-rook-cool"></i>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Driving only -->
+  <div id="speedo" hidden>
+    <div class="speed-gear">
+      <span id="gear-value">D</span>
+      <span class="micro">GEAR</span>
+    </div>
+    <div class="speed-main">
+      <span id="speed-value">000</span>
+      <span class="speed-unit">KM/H</span>
+    </div>
+    <div class="speed-bar"><div id="speed-fill"></div></div>
+  </div>
+
+  <!-- Center reticle, prompt, notifications -->
+  <div id="crosshair" aria-hidden="true">
+    <i class="ch-dot"></i>
+    <i class="ch-line top"></i><i class="ch-line right"></i>
+    <i class="ch-line bottom"></i><i class="ch-line left"></i>
+  </div>
+
+  <div id="prompt" hidden><b>E</b><span>STEAL VEHICLE</span></div>
+
+  <div id="toast-feed" aria-live="polite"></div>
+
+  <div id="busted-meter" hidden>
+    <div class="busted-label"><span id="busted-title">BUSTED</span><span id="busted-pct">0%</span></div>
+    <div class="busted-track"><div id="busted-fill"></div></div>
+  </div>
+
+  <div id="dialogue" hidden>
+    <div class="dialogue-portrait" id="dialogue-portrait" aria-hidden="true"></div>
+    <div class="dialogue-copy">
+      <span id="dialogue-speaker">MAYA</span>
+      <p id="dialogue-text">Keep your eyes on the road, Leo.</p>
+    </div>
+    <span class="dialogue-next">SPACE</span>
+  </div>
+
+  <div id="mission-banner" hidden>
+    <div id="banner-kicker">MISSION COMPLETE</div>
+    <div id="banner-title">VALET RUN</div>
+    <div id="banner-sub">$1,500 · 00:42 · RANK A</div>
+  </div>
+
+  <div id="autosave" hidden><span class="save-dot"></span>AUTOSAVED</div>
+
+  <div id="fps-meter" hidden>-- FPS</div>
+  <div id="stats-overlay" hidden>
+    <div class="stats-head">LEONIDA HEAT 3D <span>PERFORMANCE</span></div>
+    <pre id="stats-text">fps -- · draws -- · tris --</pre>
+    <div class="stats-foot">?stats=1 · ?shot=hero|city|chase|mission</div>
+  </div>
+</div>
+
+<!-- ============================ TITLE ============================ -->
+<section id="title-screen" class="screen title-screen" aria-hidden="true">
+  <div class="title-vignette"></div>
+  <div class="title-scan"></div>
+  <div class="title-layout">
+    <div class="title-brand">
+      <div class="title-kicker"><span class="kicker-rule"></span>COSTA SOL · FLORIDA · 1986</div>
+      <h1 class="title-logo" aria-label="Leonida Heat 3D">
+        <span class="logo-leonida">LEONIDA</span>
+        <span class="logo-heat">HEAT</span>
+        <span class="logo-3d">3D</span>
+      </h1>
+      <p class="title-tag">The city always collects.</p>
+      <p class="title-blurb">Sun, sand and unpaid debts. Work the marina, run the boulevard and keep the heat off your back long enough to buy your way out of Costa Sol.</p>
+
+      <nav class="title-menu" aria-label="Main menu">
+        <button type="button" id="btn-new-game" class="menu-btn primary"><span class="menu-num">01</span>NEW GAME</button>
+        <button type="button" id="btn-continue" class="menu-btn"><span class="menu-num">02</span>CONTINUE</button>
+        <button type="button" id="btn-how-to-play" class="menu-btn"><span class="menu-num">03</span>HOW TO PLAY</button>
+        <button type="button" id="btn-credits" class="menu-btn"><span class="menu-num">04</span>CREDITS</button>
+      </nav>
+
+      <div class="title-foot">
+        <span id="title-best">NO SAVE DATA</span>
+        <span class="title-dot"></span>
+        <span>ORIGINAL PROCEDURAL ASSETS</span>
+        <span class="title-dot"></span>
+        <span>THREE.JS · MIT</span>
+      </div>
+    </div>
+
+    <div class="title-side">
+      <div class="side-card">
+        <span class="micro">TONIGHT IN COSTA SOL</span>
+        <b>28°C · HAZE</b>
+        <span>OCEAN DRIVE</span>
+      </div>
+      <div class="side-card warning">
+        <span class="micro">CURRENT HEAT</span>
+        <b>0 / 5 STARS</b>
+        <span>NO UNITS PURSUING</span>
+      </div>
+      <div class="title-credits">
+        <span>DESIGNED &amp; BUILT BY</span>
+        <b>MATRIX NEO AI AGENT</b>
+        <span>1280 × 720 · OFFLINE · NO BUILD STEP</span>
+      </div>
+    </div>
+  </div>
+  <div class="title-strip" aria-hidden="true">
+    <span>COSTA SOL</span><span>MARINA</span><span>PLAZA SOL</span><span>THE PIER</span><span>RING ROAD</span><span>CROWE ESTATE</span>
+  </div>
+</section>
+
+<!-- ============================ PAUSE ============================ -->
+<section id="pause-screen" class="screen overlay-screen" aria-hidden="true">
+  <div class="modal pause-modal">
+    <div class="modal-head">
+      <span class="micro">LEONIDA HEAT 3D</span>
+      <h2>PAUSED</h2>
+      <p id="pause-sub">COSTA SOL · 18:12 · HAZE</p>
+    </div>
+    <div class="modal-menu">
+      <button type="button" id="btn-resume" class="menu-btn primary"><span class="menu-num">01</span>RESUME</button>
+      <button type="button" id="btn-save" class="menu-btn"><span class="menu-num">02</span>SAVE GAME</button>
+      <button type="button" id="btn-restart" class="menu-btn"><span class="menu-num">03</span>RESTART MISSION</button>
+      <button type="button" id="btn-mute" class="menu-btn"><span class="menu-num">04</span>AUDIO: ON</button>
+      <button type="button" id="btn-quality" class="menu-btn"><span class="menu-num">05</span>SHADOWS: HIGH</button>
+      <button type="button" id="btn-quit" class="menu-btn danger"><span class="menu-num">06</span>QUIT TO TITLE</button>
+    </div>
+    <div class="modal-foot">
+      <span>ESC RESUME</span><span>M MUTE</span><span>TAB MAP</span>
+    </div>
+  </div>
+</section>
+
+<!-- ========================= WEAPON WHEEL ========================= -->
+<section id="weapon-wheel" class="screen wheel-screen" aria-hidden="true">
+  <div class="wheel-wrap">
+    <div class="wheel-head">
+      <span class="micro" id="wheel-mode">ARMORY · FREE ROAM</span>
+      <h2 id="wheel-title">WEAPON WHEEL</h2>
+      <span id="wheel-money" class="wheel-money">$000000</span>
+    </div>
+    <div id="wheel-ring" class="wheel-ring">
+      <div class="wheel-slot" id="wheel-slot-fists" data-weapon="fists">
+        <span class="slot-key">1</span><span class="slot-name">FISTS</span>
+        <span class="slot-ammo">MELEE</span><span class="slot-price">OWNED</span>
+      </div>
+      <div class="wheel-slot" id="wheel-slot-pistol" data-weapon="pistol">
+        <span class="slot-key">2</span><span class="slot-name">PISTOL</span>
+        <span class="slot-ammo">12 / 96</span><span class="slot-price">$450</span>
+      </div>
+      <div class="wheel-slot" id="wheel-slot-smg" data-weapon="smg">
+        <span class="slot-key">3</span><span class="slot-name">SMG</span>
+        <span class="slot-ammo">30 / 180</span><span class="slot-price">$1,250</span>
+      </div>
+      <div class="wheel-slot" id="wheel-slot-shotgun" data-weapon="shotgun">
+        <span class="slot-key">4</span><span class="slot-name">SHOTGUN</span>
+        <span class="slot-ammo">6 / 36</span><span class="slot-price">$1,800</span>
+      </div>
+      <div class="wheel-slot" id="wheel-slot-rifle" data-weapon="rifle">
+        <span class="slot-key">5</span><span class="slot-name">RIFLE</span>
+        <span class="slot-ammo">20 / 100</span><span class="slot-price">$3,200</span>
+      </div>
+      <div class="wheel-center">
+        <span class="micro">SELECTED</span>
+        <b id="wheel-selected">PISTOL</b>
+        <span id="wheel-selected-ammo">12 / 96</span>
+      </div>
+    </div>
+    <div id="wheel-detail" class="wheel-detail">
+      <div class="dmg-label"><span>DAMAGE</span><span id="wheel-damage-value">24</span></div>
+      <div class="dmg-track"><div id="wheel-damage-fill" style="width:42%"></div></div>
+      <p id="wheel-hint">ENTER / CLICK TO BUY · Q OR ESC TO CLOSE · 1—5 EQUIP</p>
+    </div>
+  </div>
+</section>
+
+<!-- =========================== BRIEFING =========================== -->
+<section id="briefing" class="screen overlay-screen" aria-hidden="true">
+  <div class="modal briefing-modal">
+    <div class="briefing-top">
+      <div class="portrait-frame">
+        <canvas id="briefing-portrait" width="220" height="260" aria-label="Mission contact portrait"></canvas>
+        <span class="portrait-scan" aria-hidden="true"></span>
+      </div>
+      <div class="briefing-copy">
+        <span class="micro" id="briefing-kicker">MISSION 01 · THE MARINA</span>
+        <h2 id="briefing-title">VALET RUN</h2>
+        <div class="briefing-giver"><span class="giver-rule"></span><span id="briefing-giver">VINNIE SALTA</span><span id="briefing-role">MARINA BOSS</span></div>
+        <div id="briefing-lines" class="briefing-lines"></div>
+        <div class="briefing-meta">
+          <div><span class="micro">REWARD</span><b id="briefing-reward">$1,500</b></div>
+          <div><span class="micro">TIME LIMIT</span><b id="briefing-time">90 SEC</b></div>
+          <div><span class="micro">HEAT</span><b id="briefing-heat">LEVEL 0</b></div>
+        </div>
+      </div>
+    </div>
+    <div class="briefing-bottom">
+      <div id="briefing-objectives" class="briefing-objectives"></div>
+      <div class="briefing-actions">
+        <span class="micro">SPACE / ENTER TO BEGIN</span>
+        <button type="button" id="btn-briefing-start" class="menu-btn primary"><span class="menu-num">▶</span>START MISSION</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ RESULT ============================ -->
+<section id="result-screen" class="screen overlay-screen" aria-hidden="true">
+  <div class="modal result-modal">
+    <span class="micro" id="result-kicker">MISSION COMPLETE</span>
+    <h2 id="result-title">VALET RUN</h2>
+    <div class="result-rank" id="result-rank">A</div>
+    <div class="result-stats" id="result-stats">
+      <div><span class="micro">PAYOUT</span><b>$1,500</b></div>
+      <div><span class="micro">TIME</span><b>00:42</b></div>
+      <div><span class="micro">HEAT CLEARED</span><b>2 ★</b></div>
+    </div>
+    <p id="result-message">The Serata is parked out front. Vinnie sends his regards — and your cut.</p>
+    <div class="result-actions">
+      <button type="button" id="btn-result-continue" class="menu-btn primary"><span class="menu-num">▶</span>CONTINUE</button>
+      <button type="button" id="btn-result-retry" class="menu-btn" hidden><span class="menu-num">↺</span>RETRY MISSION</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================= HELP ============================= -->
+<section id="help-screen" class="screen overlay-screen" aria-hidden="true">
+  <div class="modal help-modal">
+    <div class="modal-head">
+      <span class="micro">FIELD MANUAL</span>
+      <h2>HOW TO PLAY</h2>
+      <p>Keep moving. The city remembers.</p>
+    </div>
+    <div class="help-grid">
+      <div class="help-col">
+        <h3>ON FOOT</h3>
+        <div class="help-row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Move relative to camera</span></div>
+        <div class="help-row"><kbd>SHIFT</kbd><span>Sprint</span></div>
+        <div class="help-row"><kbd>SPACE</kbd><span>Dodge</span></div>
+        <div class="help-row"><kbd>MOUSE</kbd><span>Look · click to lock</span></div>
+        <div class="help-row"><kbd>LMB</kbd><span>Fire / punch</span></div>
+        <div class="help-row"><kbd>RMB</kbd><span>Aim zoom</span></div>
+        <div class="help-row"><kbd>R</kbd><span>Reload</span></div>
+      </div>
+      <div class="help-col">
+        <h3>THE STREET</h3>
+        <div class="help-row"><kbd>E</kbd><span>Enter / exit vehicle · interact</span></div>
+        <div class="help-row"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd><kbd>5</kbd><span>Select weapon</span></div>
+        <div class="help-row"><kbd>Q</kbd><span>Weapon wheel / shop</span></div>
+        <div class="help-row"><kbd>X</kbd><span>Maya decoy</span></div>
+        <div class="help-row"><kbd>C</kbd><span>Dez repair</span></div>
+        <div class="help-row"><kbd>V</kbd><span>Rook backup</span></div>
+        <div class="help-row"><kbd>TAB</kbd><span>Map / phone</span></div>
+      </div>
+      <div class="help-col">
+        <h3>SYSTEM</h3>
+        <div class="help-row"><kbd>ESC</kbd><span>Pause</span></div>
+        <div class="help-row"><kbd>M</kbd><span>Mute audio</span></div>
+        <div class="help-row"><kbd>F</kbd><span>Toggle fullscreen</span></div>
+        <div class="help-row"><kbd>H</kbd><span>This manual</span></div>
+        <div class="help-note">Wanted stars decay when you break line of sight. Three stars brings roadblocks. Five brings the whole department.</div>
+        <div class="help-note">Missions pay better when you finish fast and keep the collateral low.</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span>ALL ASSETS PROCEDURAL</span><span>THREE.JS r147 · MIT</span>
+      <button type="button" id="btn-help-close" class="menu-btn primary"><span class="menu-num">ESC</span>CLOSE</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ CREDITS =========================== -->
+<section id="credits-screen" class="screen overlay-screen" aria-hidden="true">
+  <div class="modal help-modal credits-modal">
+    <div class="modal-head">
+      <span class="micro">THANK YOU FOR PLAYING</span>
+      <h2>CREDITS</h2>
+      <p>LEONIDA HEAT 3D · COSTA SOL</p>
+    </div>
+    <div class="credits-body">
+      <p><b>DESIGN &amp; ENGINEERING</b><br>Matrix Neo AI Agent</p>
+      <p><b>ENGINE</b><br>Three.js r147 (MIT) · procedural geometry &amp; canvas textures</p>
+      <p><b>AUDIO</b><br>Web Audio synthesis — no samples, no downloads</p>
+      <p><b>SPECIAL THANKS</b><br>The open-source Three.js community</p>
+      <p class="credits-small">This is a work of fiction. Costa Sol, Leonida and all characters are original. Any resemblance to real places or persons is coincidental.</p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" id="btn-credits-close" class="menu-btn primary"><span class="menu-num">ESC</span>BACK</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ SCRIPTS ============================ -->
+<script src="./vendor/three.min.js"></script>
+<script src="./src/config.js"></script>
+<script src="./src/rng.js"></script>
+<script src="./src/input.js"></script>
+<script src="./src/audio.js"></script>
+<script src="./src/world.js"></script>
+<script src="./src/entities.js"></script>
+<script src="./src/traffic.js"></script>
+<script src="./src/police.js"></script>
+<script src="./src/combat.js"></script>
+<script src="./src/missions.js"></script>
+<script src="./src/hud.js"></script>
+<script src="./src/camera.js"></script>
+<script src="./src/shots.js"></script>
+<script src="./src/game.js"></script>
+<script src="./src/main.js"></script>
 </body>
 </html>

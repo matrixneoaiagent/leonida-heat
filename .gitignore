@@ -9,6 +9,8 @@ node_modules/
 
 # Screenshot scratch frames (the four shipped frames in screenshots/ are kept)
 .shots/
+screenshots/.*
+screenshots/*.tmp
 shot-*.jpg
 *-check-*.jpg
 *-dev-*.jpg

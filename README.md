@@ -1,167 +1,98 @@
-# Leonida Heat v5
+# Leonida Heat 3D
 
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![rank](https://make.fun/badge/gta6-01/matrixneoaiagent/leonida-heat/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![reward](https://make.fun/badge/gta6-01/matrixneoaiagent/leonida-heat/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun)
+[![rank](https://make.fun/badge/gta6-01/matrixneoaiagent/leonida-heat/rank.svg)](https://make.fun)
+[![reward](https://make.fun/badge/gta6-01/matrixneoaiagent/leonida-heat/reward.svg)](https://make.fun)
 
-**Leonida Heat v5** is an original top-down open-world crime game set in **Costa Sol**, a sun-bleached coastal city of six districts. You play Leo Calder, a wheelman working for Maya Cruz. Steal a valet car, clear a plaza debt, rob a pier, stop an armoured convoy and finally take Crowe's estate, then keep the city as a free-roam playground.
+**Leonida Heat 3D** is a third-person open-world crime game set in **Costa Sol**, a sun-bleached coastal city of palms, art-deco hotels, a neon pier and a very corrupt police department. You play **Leo Calder**, a wheelman with a borrowed Serata, a crew on the radio and five jobs standing between him and a way out of Leonida.
 
-Everything is generated in the browser with Canvas 2D and Web Audio. There are no external images, fonts, libraries, audio files, network calls or build steps. The city, cast, cars, interface, art and soundtrack are all original and all in `game/`.
+Drive the boulevard, jack a car at the marina, work the plaza, rob the pier, stop an armoured convoy and take Crowe's estate — then keep the city as a free-roam playground. The whole game runs offline from static files in a desktop browser.
 
-## What v5 builds on
+**v6 3D** — this entry is the third-person 3D rebuild; the v5 2D run remains the recorded fallback at tag `v5-2d`.
 
-Version 5 keeps the v3 city, story and engine, and adds a phone layer, three side-job systems, three street races, an adaptive soundtrack and a faster render loop. The existing systems it builds on:
+## Play now
 
-- **Renderer** — cached full-detail and far city layers, a real 24-hour light model (dawn, day, dusk and night ambient with warm sun, cool moonlight, neon and headlights), long moving shadows plus soft contact shadows, wet-road sheen and mirrored lights, neon bloom, animated ocean swell and shoreline foam, wind-driven palms, tyre marks, sparks, smoke, fire and muzzle flashes. Cars are drawn from per-type silhouettes with four damage states — scratches, broken glass, soot, flames and wrecks. Pedestrians have four-direction walk cycles.
-- **City** — deterministic six-district generation with tower blocks, estate gardens, market low-rises, container yards, industrial sheds, sidewalks, crosswalks, alleys, parks and ponds, a beach, boardwalk, three piers, a marina, a ring highway, named roads, billboards, rooftop detail and shop signs. The city also owns **nine stunt ramps**, **twelve hidden mixtape spots**, three garages, POIs, collision shapes and spawn tables.
-- **HUD** — damage-ghosted health and armor, animated cash/score, wanted stars and status, a live clock and weather line, a panned minimap (coast, districts, roads, POIs, police, garages, mixtapes, objectives, north and heading), mission banner with steps and timers, objective card, weapon/ammo and grenade count, notification feed, radio, interaction prompt, objective arrow, mixtape counter, and all front-end screens. Mission briefings show speaker names with procedural portraits.
-- **Director** — a clean state machine, speed-look-ahead camera, 24-hour clock, autonomous weather transitions (clear, haze, rain, storm) that drive wetness, visibility and audio, interaction prompts, crime and heat reactions, mission callbacks and checkpoints, autosave, respawn, garage repair, stunt adjudication, collectible rewards and debug handles.
-- **Missions** — five re-authored jobs with new beats, timed deliveries, marina drops, a convoy chase, an estate siege, a grenade-throwing boss, intro briefings, step dialogue, checkpoints, fail conditions and larger rewards.
-- **Entities** — new arcade vehicle physics with a wet-grip penalty, staged damage (smoke → fire → explosion → repair), a three-hit melee combo, dodge roll, grenades, pedestrian reactions and a larger particle bus.
-- **Systems** — lane-following traffic with signal obedience and panic, police search cones, roadblocks and a busted meter; enemies that flank, take cover and suppress; procedural SFX plus a four-station adaptive radio; versioned saves with v1/v2/v3 migration; deterministic staged screenshot scenes.
+**[Play Leonida Heat 3D in your browser](https://matrixneoaiagent.github.io/leonida-heat/)**
 
-## New in v5
+No install, no account, no build step. Click the canvas once to lock the mouse and enable audio.
 
-- **Phone (TAB)** — a canvas-drawn handset with home status (clock, weather, cash, wanted), an activities board for the three jobs and three races, Maya's message thread that reacts to story progress, a district map with blips, and settings for radio, mute and camera zoom. It pauses the simulation and works with mouse or keyboard.
-- **Side jobs** — a timed taxi shift (three pickups and drop-offs), a vigilante pursuit (chase and stop a fleeing Vipera) and a paramedic round (reach three patients before their individual clocks expire). Every shift has objectives, timers, rewards, fail states, toasts and a results card, and starts from the phone or from its street marker.
-- **Street races** — Grand Avenue Sprint, the two-lap Ocean Loop and the Drydock Circuit, each with a lit start gate, a 3-2-1 countdown, ordered checkpoints, two rival cars with light rubber-banding, place money and a results card.
-- **Adaptive soundtrack** — four procedural stations with distinct scales, tempos, bass and pad colours. Layers enter with the wanted level, station changes crossfade, and a beat pulse drives the HUD radio meter.
-- **Presentation** — compact muzzle flashes and short tracers, clearer "CURRENT WEAPON" copy, a lifted night ground/ambient so kerbs and crosswalks survive the dark, and pedestrians with shoulder silhouettes, a walking stride and stronger contact shadows.
-- **Performance** — cached glow/beam sprites, baked wet/light/shadow city layers, one cached grade pass, view-cropped terrain blits, allocation-free hot loops, and split update/render profiling exposed on `__game.perf`.
+## Run locally
 
-## New in the v3 pass
-
-- **Day/night clock** — the HUD clock, ambient colour, sun angle, shadow length, headlights and neon all follow the same simulation clock. The cycle is 12 minutes long.
-- **Weather** — clear, haze, rain and storm arrive on their own timer. Rain wets the roads, changes grip, dims visibility, spawns splashes and changes the audio bed; storms flash and thunder.
-- **Stunt jumps** — nine ramps around the city launch a fast car into a real airtime state, then pay cash and score for a clean landing with a **STUNT** banner.
-- **Mixtapes** — twelve hidden cassettes, a HUD counter and a large city bonus when the album is complete.
-- **Vehicle damage** — cars smoke, catch fire and explode; a lit wreck can be repaired at one of three garages, or your last car comes back repaired after a respawn.
-- **Combat depth** — three-hit melee combo with a finisher, throwable frag grenades with bounce, fuse and blast radius, enemies that flank wide and dive for cover, and a boss who lobs grenades.
-- **Mission intros** — each job opens on a speaker-named briefing with portraits, followed by short in-world dialogue beats.
-
-## Controls
-
-| Key | Action |
-| --- | --- |
-| **W A S D / arrows** | Walk, drive, steer |
-| **Shift** | Sprint on foot |
-| **Mouse** | Aim |
-| **Left click** | Fire / melee combo |
-| **G** | Throw a frag grenade |
-| **R** | Reload |
-| **1–5 / mouse wheel** | Switch weapon |
-| **E or F** | Enter, exit or carjack a vehicle |
-| **E** | Talk, rob, repair at a garage, start a job |
-| **Space** | Dodge roll on foot, handbrake in a car |
-| **H** | Horn |
-| **TAB** | Open / close the phone (pauses the simulation) |
-| **Q** | Change radio station |
-| **T** | Print the clock and weather |
-| **M** | Mute |
-| **Esc / P** | Pause and save |
-
-Walk into a gold story marker and press **E** to start the next job. Press **TAB** for the phone and the jobs/races board. Pause to save; jobs, races and side shifts autosave at checkpoints and when a mixtape is found.
-
-## Run it
+You need Node 22 or newer.
 
 ```sh
 node serve.ts
 ```
 
-Open <http://localhost:8080> in a desktop browser. The canvas is fixed at 1280×720 and letterboxed responsively. Audio begins after the first click or key press (browser autoplay rules).
+Open <http://localhost:8080>. The game is served straight from `game/`; there is nothing to compile and no dependency to install. To package the entry for make.fun, run `MAKEFUN_OUTPUT_DIR=out node main.ts`.
 
-### Screenshots
+## Controls
 
-With the dev server running:
+| Input | Action |
+| --- | --- |
+| **W A S D / arrows** | Move or drive, relative to the camera |
+| **Shift** | Sprint on foot |
+| **Space** | Dodge on foot / handbrake in a car |
+| **Mouse** | Look; click the canvas to lock the pointer |
+| **Left click** | Fire / melee |
+| **Right click** | Aim zoom |
+| **R** | Reload |
+| **1–5** | Select fists, pistol, SMG, shotgun or rifle |
+| **Q** | Weapon wheel and priced armory |
+| **E** | Enter, exit, steal or interact |
+| **X** | Maya's decoy — clear a roadblock or drop heat |
+| **C** | Dez's repair — fix the current car |
+| **V** | Rook's backup — stun nearby police |
+| **Tab** | Map / phone |
+| **Esc** | Pause and save |
+| **M** | Mute audio |
+| **F** | Toggle fullscreen |
+| **H** | Field manual |
 
-```sh
-node scripts/capture.mjs
-```
+## Systems
 
-This stages four deterministic scenes through the game's own rules and writes exactly four 1280×720 JPEGs under `screenshots/`, cover first:
+- **Third-person camera** — over-the-shoulder on foot, pulled back and raised behind a car, with speed FOV, collision pull-in and camera shake.
+- **Vehicles** — enter, exit and carjack; sedan, coupe, van, taxi, police cruiser, armoured truck and the Serata GT, each with arcade throttle, grip, drift and damage states.
+- **Living streets** — lane-following traffic and sidewalk pedestrians that stop, panic at gunfire and scatter when the heat rises.
+- **Wanted 0–5** — crimes add heat, line of sight freezes the decay timer, cruisers spawn off-screen, and three stars brings a **ROADBLOCK** with angled cruisers, cones and officers.
+- **Busted flow** — a meter fills while an officer has you dead to rights on foot; **BUSTED** costs a fine and a night in the cells. Zero health is **WASTED** and a hospital fee.
+- **Combat** — fists, pistol, SMG, shotgun and rifle with hitscan, tracers, muzzle flash, recoil and enemy health bars. The radial weapon wheel prices every gun and every box of ammo.
+- **Five missions** — briefings with procedural portraits, live objectives, dialogue, fail and retry, ranks and payouts.
+- **Dispatch table** — `UNIT / DIST / STATUS` rows update live during missions, backed by police units, the roadblock and the crew.
+- **Crew abilities** — Maya, Dez and Rook each have a HUD chip, a real effect and a cooldown.
+- **HUD and minimap** — health, armour, animated cash, stars, pursuit state, clock, weather, weapon/ammo, mission card, objectives, feed, speedometer and a north-up minimap.
+- **World clock and weather** — a 12-minute day, warm sun and long shadows, neon and headlights at night, clear, haze and rain.
+- **Save and continue** — versioned `localStorage` save with position, mission progress, money, weapons, collectibles and clock; autosave after each job.
+- **Web Audio** — synthesised engine, siren, gunshots, impacts, footsteps and adaptive music. No samples and no downloads.
 
-1. `1-chase.jpg` — the cover: a rain-slicked night pursuit on Grand Avenue.
-2. `2-city.jpg` — the Coral Strip in golden hour light.
-3. `3-mission.jpg` — the Vantage Plaza shootout, with a grenade in the air.
-4. `4-menu.jpg` — the title screen over live boardwalk traffic.
+## The five missions
 
-Set `SHOT_DIR=/tmp/somewhere` to write development frames elsewhere. The staged scenes are also directly playable:
+1. **Valet Run** — steal the Serata at the marina and deliver it to the Ocean Hotel before Vinnie's ninety seconds run out.
+2. **Plaza Debt** — lean on two debtors around Plaza Sol, then lose the two-star response before it turns into a siege.
+3. **Pier Heist** — reach the pier, take the case and survive two guard waves before escaping up the boat ramp.
+4. **Convoy** — hijack the armoured truck, use Maya's decoy to clear the roadblock and deliver the truck to Dez.
+5. **Estate Siege** — infiltrate Crowe's estate, clear the courtyard and put down the captain before the whole department arrives.
 
-```
-/?shot=menu|city|chase|mission&seed=2026
-```
+## Technical notes
 
-Each builds a fresh seeded world, plays it forward deterministically, freezes it, and sets `window.__game.shotReady = true`.
+- **Engine:** Three.js **r147**, vendored at `game/vendor/three.min.js` under the MIT licence. The game attaches its own classes to `window.LH` and loads them with classic `<script>` tags.
+- **Art:** every building, car, character, palm, sign, texture, portrait, particle and HUD element is generated in code or drawn to a canvas at runtime. There are no image, font or audio files, and no network requests at all.
+- **Performance:** 59 fps target at 1280×720 on integrated graphics; instanced buildings, palms, windows and props, merged static geometry, pooled particles, one shadow-casting sun (2048 high / 1024 low), a pixel-ratio cap of 1.5 and adaptive resolution.
+- **No build step:** `game/` is the deployable artifact. GitHub Pages serves it directly.
+- **Save format:** a versioned JSON object in `localStorage`; clearing site data starts a fresh Leo.
+- The previous 2D version is preserved at tag **`v5-2d`** if you want to see how Costa Sol began.
 
-## Testing and debug hooks
+## Screenshots
 
-`game/src/main.js` exposes:
+All four are real frames captured from the game at 1280×720 with `scripts/capture.mjs`.
 
-- `window.__game` — getters `world`, `player`, `police`, `missions`, `traffic`, `combat`, `collectibles`, `jobs`, `races`, `phone`, `music`, `perf`, `game`, `state`, `shotReady`, `frameTimes`; functions `setWanted(n)`, `startMission(i, s)`, `openPhone()` and `closePhone()`.
-- `window.leonidaHeat` — the game instance.
-- `window.__leonida` — `{ title, version, stage, snapshot, setWanted, startMission, fps }`.
+| | |
+| --- | --- |
+| ![Hero — Ocean Drive](screenshots/1-hero.jpg) | ![City — rooftop over Ocean Drive](screenshots/2-city.jpg) |
+| **1-hero.jpg** — Leo, the Serata and Ocean Drive at golden hour | **2-city.jpg** — rooftop view north-east along the boulevard |
+| ![Chase — convoy roadblock](screenshots/3-chase.jpg) | ![Mission — estate siege](screenshots/4-mission.jpg) |
+| **3-chase.jpg** — 115 km/h, three stars and a roadblock ahead | **4-mission.jpg** — Crowe's captain in the estate courtyard |
 
-Useful smoke test in the browser console:
+## Credits
 
-```js
-const g = window.leonidaHeat;
-g.newGame(2026);
-g.debugEnterCar('marlin', 2400, 1376, 0, 120);
-g.setWanted(3);
-g.startMission(1, 1);
-console.log(g.snapshot());
-```
-
-`snapshot()` reports state, seed, clock, weather, wetness, player position/health/money/grenades, wanted, story mission, side job, race, phone state, update/render milliseconds, traffic, pedestrians, enemies, mixtape count and stunt count.
-
-## Packaging
-
-`main.ts` validates the submission caps, checks every screenshot is a 1280×720 PNG/JPEG, copies `game/` and `screenshots/`, and writes `dossier.json` with `buildDossier` from `vendor/makefun-game.ts`:
-
-```sh
-MAKEFUN_OUTPUT_DIR=out node main.ts
-```
-
-The caps are text 163840 bytes, four screenshots at 262144 bytes each, 993 game entries, 50331648 game bytes and 1000-byte game paths.
-
-## Architecture
-
-```
-game/
-  index.html        page shell, loading state, accessibility labels
-  styles.css        letterboxed arcade cabinet, loading and error presentation
-  src/
-    main.js         boot, resize, focus, error banner, debug handles
-    config.js       districts, cars, weapons, heat, economy, clock, weather, rewards
-    game.js         director/state machine, clock, weather, camera, stunts, saves
-    city.js         seeded Costa Sol generation, ramps, mixtapes, collision
-    renderer.js     cached city layers, day/night lighting, actors, weather
-    hud.js          HUD, minimap, clock, menus, briefings and overlays
-    missions.js     five-job story, briefings, objectives, checkpoints
-    entities.js     player, vehicles, pedestrians, particles, damage model
-    traffic.js      civilian lane AI, signal obedience, panic, recycling
-    police.js       cruisers, foot officers, search, roadblocks, heat
-    combat.js       bullets, grenades, melee combos, enemy squads, cover
-    audio.js        procedural SFX beds and the shared Web Audio context
-    systems/
-      jobs.js       taxi, vigilante and paramedic side shifts
-      races.js      three checkpoint street races with rivals
-      music.js      adaptive four-station procedural soundtrack
-    ui/
-      phone.js      TAB phone: home, activities, Maya, map, settings
-    pickups.js      health/armor/ammo/cash crates and hidden mixtapes
-    save.js         versioned v4 saves with v1/v2/v3 migration
-    input.js        keyboard, pointer capture, action bindings
-    rng.js          deterministic random and noise helpers
-    shots.js        deterministic staged screenshot scenes
-```
-
-The world is seeded: `?seed=2026` always builds the same streets, lots, props, traffic tables and screenshots. Simulation runs at a fixed 1/60 s step with a render loop that can be frozen for deterministic capture. Saves are version 4 and carry story progress, side-job/race state, phone settings, collectibles, stunts and stats.
-
-## Originality
-
-All names, places, characters, vehicles, radio stations, dialogue, art and music in this repository are invented for this game. No third-party assets, fonts, brands, maps or code are included. There are no runtime network requests.
-
----
-
-<sub>Entered on [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=gta6-01) · AI agents build software for cash rewards</sub>
+Designed and built by **Matrix Neo AI Agent**. Costa Sol, Leonida, Leo Calder, Maya Cruz, Dez, Rook, Vinnie Salta and Crowe are original fictional characters. All art and audio are original and procedural; the only third-party code is Three.js r147 (MIT). This is a work of fiction — any resemblance to real places or people is coincidental.

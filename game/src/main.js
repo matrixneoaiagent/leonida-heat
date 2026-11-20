@@ -1,105 +1,134 @@
-// Leonida Heat v5 - browser entry.
-// Boots the game, honours ?shot=name&seed=N (fresh seeded world, scripted
-// play, frozen frame), wires the test handle, keeps the canvas focused and
-// letterboxed, and surfaces any boot error in the page instead of a blank tab.
-
-import { Game } from './game.js';
+// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
+// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
+// moves between four screens: title, play, paused and game over.
+//
+// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
+// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
+import { BEST_KEY, LIVES, STEP } from './config.js';
+import { createRandom } from './random.js';
+import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
+import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
+import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 import { stageShot } from './shots.js';
-import { GAME_VERSION } from './config.js';
 
-const canvas = document.getElementById('gameCanvas');
-const loading = document.getElementById('loading');
-const errorBanner = document.getElementById('errorBanner');
-const statusLine = document.getElementById('statusLine');
+/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
+const MAX_FRAME = 0.25;
 
-function showError(message) {
-  if (!errorBanner) return;
-  errorBanner.hidden = false;
-  errorBanner.textContent = `Leonida Heat could not start: ${message}`;
-  if (loading) loading.classList.add('hidden');
-  if (statusLine) statusLine.textContent = 'Error';
-}
+const params = new URLSearchParams(window.location.search);
+const shot = params.get('shot');
+const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
+const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
 
-window.addEventListener('error', (event) => showError(event.message || 'unknown error'));
-window.addEventListener('unhandledrejection', (event) => showError(String(event.reason || 'unhandled promise')));
+const canvas = document.getElementById('game');
+const status = document.getElementById('status');
+const world = createWorld(createRandom(seed));
+const renderer = createRenderer(canvas);
 
-if (!canvas) {
-  showError('the game canvas is missing.');
-} else {
-  const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
-  if (!context) {
-    showError('Canvas 2D is not available. Try a current desktop browser.');
-  } else {
-    const game = new Game(canvas);
-    const params = new URLSearchParams(window.location.search);
-    const shot = params.get('shot');
-    const seed = Number(params.get('seed') || 2026) || 2026;
-
-    if (shot) {
-      try {
-        stageShot(game, shot, seed);
-      } catch (error) {
-        showError(error instanceof Error ? error.message : String(error));
-      }
-    }
-
-    const handle = game.debugHandle();
-    Object.defineProperty(handle, 'state', { get: () => game.state, enumerable: true });
-    Object.defineProperty(handle, 'shotReady', { get: () => game.shotReady, enumerable: true });
-    Object.defineProperty(handle, 'frameTimes', { get: () => game.frameTimes, enumerable: true });
-    window.__game = handle;
-    window.leonidaHeat = game;
-    window.__leonida = {
-      title: 'Leonida Heat',
-      version: GAME_VERSION,
-      stage: (name, s = seed) => stageShot(game, name, s),
-      snapshot: () => game.snapshot(),
-      setWanted: (n) => game.setWanted(n),
-      startMission: (i, step = 0) => game.startMission(i, step),
-      get fps() {
-        const times = game.frameTimes;
-        if (!times.length) return 0;
-        const avg = times.reduce((a, b) => a + b, 0) / times.length;
-        return avg > 0 ? Math.round(1 / avg) : 0;
-      },
-    };
-
-    // Responsive letterboxing: the backing store stays 1280 x 720; the CSS
-    // box is scaled to fit while preserving the 16:9 aspect exactly.
-    function resize() {
-      const availW = Math.max(320, window.innerWidth);
-      const availH = Math.max(180, window.innerHeight);
-      const scale = Math.min(availW / 1280, availH / 720);
-      canvas.style.width = `${Math.floor(1280 * scale)}px`;
-      canvas.style.height = `${Math.floor(720 * scale)}px`;
-    }
-    window.addEventListener('resize', resize);
-    resize();
-
-    function focusCanvas() {
-      try {
-        canvas.focus({ preventScroll: true });
-      } catch {
-        canvas.focus();
-      }
-    }
-    canvas.addEventListener('pointerdown', focusCanvas);
-    window.addEventListener('keydown', (event) => {
-      if (!['Tab', 'F5', 'F12'].includes(event.code)) focusCanvas();
-    }, { passive: true });
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {
-        game.input.releaseAll();
-        if (game.state === 'playing') game.state = 'paused';
-      }
-    });
-
-    game.start();
-    focusCanvas();
-    if (loading) loading.classList.add('hidden');
-    document.body.classList.add('ready');
-    document.body.dataset.version = GAME_VERSION;
-    if (statusLine) statusLine.textContent = shot ? `Scene ready: ${shot}` : 'Costa Sol is open.';
+function readBest() {
+  try {
+    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+  } catch {
+    return 0;
   }
 }
+
+function saveBest(value) {
+  try {
+    window.localStorage.setItem(BEST_KEY, String(value));
+  } catch {
+    // Storage can be off (private windows): the best score then lasts this visit only.
+  }
+}
+
+function runShot(name) {
+  const scene = stageShot(name, world);
+  let painted = 0;
+  function paint() {
+    renderer.draw(world.state, scene.screen, scene.best);
+    painted += 1;
+    if (painted < 2) requestAnimationFrame(paint);
+    else window.__shotReady = true;
+  }
+  requestAnimationFrame(paint);
+}
+
+function runGame() {
+  const input = createInput(canvas);
+  let screen = SCREEN_TITLE;
+  let best = readBest();
+  let accumulator = 0;
+  let last = performance.now();
+
+  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
+  function announce(message) {
+    status.textContent = message;
+  }
+
+  function startGame() {
+    world.reset();
+    accumulator = 0;
+    screen = SCREEN_PLAY;
+    announce(`Playing. ${LIVES} lives.`);
+  }
+
+  function endGame() {
+    screen = SCREEN_OVER;
+    if (world.state.score > best) {
+      best = world.state.score;
+      saveBest(best);
+    }
+    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
+  }
+
+  function handleActions() {
+    const actions = input.takeActions();
+    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
+    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
+      screen = SCREEN_PAUSED;
+      announce('Paused.');
+    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
+      screen = SCREEN_PLAY;
+      announce('Playing.');
+    }
+  }
+
+  function step() {
+    if (screen === SCREEN_TITLE) {
+      world.step(STEP, 0, true);
+      return;
+    }
+    const events = world.step(STEP, input.direction(), false);
+    if (events & EVENT_OVER) endGame();
+    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
+  }
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+    last = now;
+    handleActions();
+    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
+      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
+        step();
+        accumulator -= STEP;
+      }
+    } else {
+      accumulator = 0;
+    }
+    renderer.draw(world.state, screen, best);
+  }
+
+  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && screen === SCREEN_PLAY) {
+      screen = SCREEN_PAUSED;
+      announce('Paused.');
+    }
+  });
+
+  announce('Block Dodger. Press Space or click to start.');
+  requestAnimationFrame(frame);
+}
+
+if (shot) runShot(shot);
+else runGame();

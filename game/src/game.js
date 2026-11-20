@@ -1,13 +1,19 @@
-// Leonida Heat v3 - the game director.
-// A state machine owns the fixed-step loop, the speed-look-ahead camera, a
-// 24-hour clock that drives the renderer's light model, weather transitions,
-// interaction prompts, crime and heat reactions, mission briefings, checkpoints,
-// autosave, respawns, stunt jumps, mixtape collection, garage repairs and the
-// debug handles used by the test harness and the screenshot stager.
+// Leonida Heat v4 - the game director.
+//
+// One fixed-step loop drives a table of mode handlers. The director owns the
+// world build (seeded city, traffic, people, police, jobs, pickups), a spring
+// camera with speed lead and aim offset, a continuous 24-hour clock, a weather
+// front that eases between states, the interaction resolver, the crime and
+// mission callback flow, autosave/respawn, and the photo-mode side trip.
+//
+// Modes: title, controls, playing, dialogue, paused, missionComplete,
+// missionFailed, wasted, busted, photo, ending. External systems (missions,
+// shots, the test harness) may still set game.state directly; the handler table
+// picks the new mode up on the next tick.
 
 import {
   TIME_OF_DAY, STEP, VEHICLE_TYPES, WANTED_CONFIG, GAME_TITLE, DISTRICTS, districtAt,
-  WEATHER_CONFIG, PHYSICS_CONFIG, ECONOMY, STUNT_CONFIG, GARAGE_CONFIG, COLLECTIBLE_CONFIG,
+  WEATHER_CONFIG, ECONOMY, STUNT_CONFIG, GARAGE_CONFIG, COLLECTIBLE_CONFIG,
 } from './config.js';
 import { CityWorld } from './city.js';
 import { ParticleSystem, Player, Vehicle } from './entities.js';
@@ -20,12 +26,16 @@ import { InputManager } from './input.js';
 import { SoundEngine } from './audio.js';
 import { HUD } from './hud.js';
 import { Renderer } from './renderer.js';
-import { saveGame as persist, loadGame as restore, hasSave, saveSummary } from './save.js';
+import { saveGame as persistSave, loadGame as readSave, hasSave, saveSummary } from './save.js';
 import { mulberry32, seedFrom, pick } from './rng.js';
 
-const CAM_CLAMP = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const WORLD_SIZE = 3200;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const WORLD = 3200;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+const PLAY_MODES = new Set(['playing', 'dialogue', 'photo']);
+const HUD_MODES = new Set(['playing', 'dialogue', 'paused', 'missionComplete', 'missionFailed', 'wasted', 'busted']);
+const MENU_MODES = new Set(['title', 'paused', 'missionFailed', 'ending']);
 
 export class Game {
   constructor(canvas) {
@@ -43,43 +53,68 @@ export class Game {
     this.sessionTime = 0;
     this.timeOfDay = TIME_OF_DAY.start;
     this.todBase = TIME_OF_DAY.start;
-    this.camera = { x: 2540, y: 1240, zoom: 1.9, baseZoom: 1.9, shake: 0 };
+
+    this.camera = {
+      x: 2540, y: 1240, zoom: 1.9, baseZoom: 1.9, shake: 0,
+      leadX: 0, leadY: 0, aiming: false,
+    };
     this.lastFrame = 0;
     this.accumulator = 0;
     this.running = false;
+    this.frameTimes = [];
+
     this.shotFrozen = false;
     this.shotStaging = false;
     this.shotReady = false;
-    this.frameTimes = [];
     this.bustedTriggered = false;
     this.wastedTriggered = false;
     this.missionComplete = null;
     this.missionFailed = null;
+    this.pendingFail = null;
     this.saveNotice = 0;
     this.prompt = '';
-    this.dialogueReturn = 'playing';
     this.dialogueQueue = [];
     this.dialogueIndex = 0;
     this.dialogueTotal = 0;
+    this.dialogueReturn = 'playing';
     this.controlsReturn = 'title';
-    this.pendingFail = null;
+
     this.titleAnchor = { x: 2530, y: 1280 };
     this.titleDrift = 0;
     this.crimeCooldown = 0;
     this.districtId = null;
-    this.debug = {};
+
     this.seed = 2026;
-    this.weatherRng = mulberry32(2026);
-    this.weather = { type: 'clear', intensity: 0, wetness: 0, wind: 0.3, flash: 0, timer: 80, next: 'clear', windPhase: 0 };
+    this.rng = mulberry32(this.seed);
+    this.weatherRng = mulberry32(this.seed ^ 0x51ed270b);
+    this.weather = this.freshWeather('clear', 0);
     this.simulate = null;
     this.handle = null;
+
     this.stunt = null;
     this.stuntsCount = 0;
     this.bestStunt = 0;
     this.stuntCash = 0;
     this.lastVehicle = null;
-    this.stats = { kills: 0, crimes: 0, jobs: 0 };
-    this.shotFreeNote = '';
+    this.stats = { kills: 0, crimes: 0, jobs: 0, photos: 0 };
+
+    this.photoCount = 0;
+    this.photo = { x: 2540, y: 1240, zoom: 1.9, photos: 0, flash: 0 };
+
+    this.modes = {
+      title: (dt) => this.modeTitle(dt),
+      controls: (dt) => this.modeControls(dt),
+      playing: (dt) => this.modePlaying(dt),
+      dialogue: (dt) => this.modeDialogue(dt),
+      paused: (dt) => this.modePaused(dt),
+      missionComplete: (dt) => this.modeMissionComplete(dt),
+      missionFailed: (dt) => this.modeMissionFailed(dt),
+      wasted: (dt) => this.modeFate(dt),
+      busted: (dt) => this.modeFate(dt),
+      photo: (dt) => this.modePhoto(dt),
+      ending: (dt) => this.modeEnding(dt),
+    };
+
     this.buildWorld(this.seed, true);
     this.startTitle();
   }
@@ -87,6 +122,23 @@ export class Game {
   // =================================================================
   // World construction
   // =================================================================
+  freshWeather(type, intensity) {
+    return {
+      type,
+      intensity,
+      targetIntensity: intensity,
+      wetness: 0,
+      wind: 0.32,
+      targetWind: 0.32,
+      windPhase: 0,
+      gust: 0,
+      flash: 0,
+      timer: 70,
+      next: type,
+      front: 0,
+    };
+  }
+
   buildWorld(seed, title = false) {
     this.seed = seed >>> 0;
     this.city = new CityWorld(this.seed);
@@ -106,6 +158,7 @@ export class Game {
     this.missions = new MissionManager(this.city, this);
     this.missions.currentIndex = 0;
     this.missions.active = false;
+
     this.bustedTriggered = false;
     this.wastedTriggered = false;
     this.missionComplete = null;
@@ -125,18 +178,17 @@ export class Game {
     this.dialogueQueue = [];
     this.dialogueIndex = 0;
     this.dialogueTotal = 0;
-    this.stats = { kills: 0, crimes: 0, jobs: 0 };
+    this.photosThisRun = 0;
+    this.photoCount = 0;
+    this.photo = { x: 0, y: 0, zoom: 1.9, photos: 0, flash: 0 };
+    this.stats = { kills: 0, crimes: 0, jobs: 0, photos: 0 };
+
     this.weatherRng = mulberry32((this.seed ^ 0x51ed270b) >>> 0);
-    this.weather = {
-      type: 'clear',
-      intensity: 0,
-      wetness: 0,
-      wind: 0.25 + this.weatherRng() * 0.4,
-      flash: 0,
-      timer: 60 + this.weatherRng() * 50,
-      next: pick(this.weatherRng, WEATHER_CONFIG.types),
-      windPhase: 0,
-    };
+    this.weather = this.freshWeather('clear', 0);
+    this.weather.wind = 0.24 + this.weatherRng() * 0.42;
+    this.weather.targetWind = this.weather.wind;
+    this.weather.timer = 60 + this.weatherRng() * 50;
+    this.weather.next = pick(this.weatherRng, WEATHER_CONFIG.types);
 
     if (title) {
       this.traffic.seed(2360, 1320, 28, 22);
@@ -144,6 +196,7 @@ export class Game {
       this.camera.x = 2260;
       this.camera.y = 1280;
       this.camera.zoom = 1.9;
+      this.camera.baseZoom = 1.9;
       this.titleAnchor = { x: 2260, y: 1280 };
     } else {
       this.traffic.seed(this.player.x, this.player.y, 20, 20);
@@ -151,8 +204,11 @@ export class Game {
       this.camera.x = this.player.x + 80;
       this.camera.y = this.player.y;
       this.camera.zoom = 2.02;
+      this.camera.baseZoom = 2.02;
       this.ui.setDistrict('Coral Strip', 'Beachfront & Neon Boardwalk');
     }
+    this.camera.shake = 0;
+
     this.ui.displayedMoney = this.player.money;
     this.ui.displayedHealth = this.player.health;
     this.ui.displayedArmor = this.player.armor;
@@ -164,6 +220,7 @@ export class Game {
     this.ui.objectiveHint = '';
     this.ui.menuIndex = 0;
     this.ui.prompt = '';
+    this.ui.photoFlash = 0;
     this.audio.setRain(0);
     this.audio.setWind(this.weather.wind);
     this.audio.setMusicIntensity(0);
@@ -182,13 +239,27 @@ export class Game {
   }
 
   // =================================================================
-  // States
+  // State machine
   // =================================================================
+  enterMode(next, meta = {}) {
+    this.state = next;
+    this.stateTimer = 0;
+    if (meta.duration !== undefined) this.stateDuration = meta.duration;
+    this.ui.menuIndex = 0;
+    if (next !== 'playing' && next !== 'dialogue' && next !== 'photo') {
+      this.prompt = '';
+      this.ui.prompt = '';
+    }
+    if (next === 'paused') this.audio.setTireScreech(0);
+    if (next === 'photo') {
+      this.audio.setTireScreech(0);
+      this.audio.stopEngine();
+    }
+  }
+
   startTitle(seed = null) {
     if (seed !== null) this.buildWorld(seed, true);
-    this.state = 'title';
-    this.stateTimer = 0;
-    this.ui.menuIndex = 0;
+    this.enterMode('title');
     this.ui.dialog = null;
     this.ui.banner = null;
     this.ui.toasts = [];
@@ -202,12 +273,12 @@ export class Game {
   }
 
   newGame(seed = null) {
-    const s = seed === null ? (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0 : seed;
-    this.buildWorld(s, false);
-    this.state = 'playing';
-    this.stateTimer = 0;
+    const chosen = seed === null
+      ? (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0
+      : seed >>> 0;
+    this.buildWorld(chosen, false);
+    this.enterMode('playing');
     this.ui.displayedMoney = this.player.money;
-    this.ui.menuIndex = 0;
     this.ui.setDistrict('Coral Strip', 'Beachfront & Neon Boardwalk');
     this.camera.x = this.player.x;
     this.camera.y = this.player.y;
@@ -224,56 +295,63 @@ export class Game {
   }
 
   loadSave(silent = false) {
-    const data = restore();
+    const data = readSave();
     if (!data) {
       if (!silent) this.ui.showToast('No save found.', 'warning', 2);
       return false;
     }
     this.buildWorld(data.seed || 1, false);
-    const p = data.player || {};
-    this.player.x = p.x ?? 2530;
-    this.player.y = p.y ?? 1180;
-    this.player.angle = p.angle ?? 0;
-    this.player.health = p.health ?? 100;
-    this.player.armor = p.armor ?? 25;
-    this.player.money = p.money ?? ECONOMY.startingCash;
-    this.player.score = p.score ?? 0;
-    this.player.grenades = p.grenades ?? 2;
-    this.player.currentWeaponIndex = Math.max(0, Math.min(4, p.weaponIndex ?? 1));
-    if (p.ammo) {
-      for (const key of Object.keys(this.player.ammo)) {
-        if (p.ammo[key]) this.player.ammo[key] = { ...this.player.ammo[key], ...p.ammo[key] };
+    const saved = data.player || {};
+    const p = this.player;
+    p.x = saved.x ?? 2530;
+    p.y = saved.y ?? 1180;
+    p.angle = saved.angle ?? 0;
+    p.health = saved.health ?? 100;
+    p.armor = saved.armor ?? 25;
+    p.money = saved.money ?? ECONOMY.startingCash;
+    p.score = saved.score ?? 0;
+    p.grenades = saved.grenades ?? 2;
+    p.currentWeaponIndex = clamp(saved.weaponIndex ?? 1, 0, 4);
+    if (saved.ammo) {
+      for (const key of Object.keys(p.ammo)) {
+        if (saved.ammo[key]) p.ammo[key] = { ...p.ammo[key], ...saved.ammo[key] };
       }
     }
     this.timeOfDay = data.timeOfDay ?? TIME_OF_DAY.start;
     this.todBase = this.timeOfDay;
     this.sessionTime = 0;
-    if (data.weather) this.weather = { ...this.weather, ...data.weather, flash: 0 };
+    if (data.weather) {
+      this.weather = { ...this.weather, ...data.weather, flash: 0 };
+      this.weather.targetIntensity = WEATHER_CONFIG.rainIntensity[this.weather.type] || 0;
+      this.weather.targetWind = this.weather.wind;
+    }
     this.collectibles.restore(data.collectibles?.found || [], data.collectibles?.rewarded);
     this.stuntsCount = data.stunts?.count ?? 0;
     this.bestStunt = data.stunts?.best ?? 0;
     this.stuntCash = data.stunts?.cash ?? 0;
-    this.stats = { ...this.stats, ...(data.stats || {}) };
-    const ms = data.missions || {};
-    this.missions.currentIndex = Math.min(4, ms.currentIndex ?? 0);
-    this.missions.completedCount = ms.completedCount ?? 0;
-    this.missions.checkpointStep = ms.checkpoint ?? ms.stepIndex ?? 0;
-    if (ms.active && this.missions.currentIndex < this.missions.defs.length) {
-      this.missions.resume(this.missions.currentIndex, ms.stepIndex ?? 0);
+    this.stats = { kills: 0, crimes: 0, jobs: 0, photos: 0, ...(data.stats || {}) };
+    this.photoCount = this.stats.photos || 0;
+    const missions = data.missions || {};
+    this.missions.currentIndex = clamp(missions.currentIndex ?? 0, 0, 4);
+    this.missions.completedCount = missions.completedCount ?? 0;
+    this.missions.checkpointStep = missions.checkpoint ?? missions.stepIndex ?? 0;
+    if (missions.active && this.missions.currentIndex < this.missions.defs.length) {
+      this.missions.resume(this.missions.currentIndex, missions.stepIndex ?? 0);
     }
     this.police.setWanted(data.wanted || 0);
     this.audio.setMuted(!!data.settings?.muted);
     this.audio.setStation(data.settings?.station ?? 0);
+
     this.traffic.seed(this.player.x, this.player.y, 20, 20);
     this.combat.populate(this.player.x, this.player.y, 44, 900);
-    this.state = 'playing';
-    this.ui.displayedMoney = this.player.money;
-    this.ui.displayedHealth = this.player.health;
-    this.ui.displayedArmor = this.player.armor;
-    this.ui.healthGhost = this.player.health;
-    this.ui.armorGhost = this.player.armor;
-    this.camera.x = this.player.x;
-    this.camera.y = this.player.y;
+    this.enterMode('playing');
+    this.ui.displayedMoney = p.money;
+    this.ui.displayedHealth = p.health;
+    this.ui.displayedArmor = p.armor;
+    this.ui.healthGhost = p.health;
+    this.ui.armorGhost = p.armor;
+    this.camera.x = p.x;
+    this.camera.y = p.y;
     this.camera.zoom = 2.02;
     this.input.updateWorldMouse(this.camera);
     this.ui.setDistrict('Costa Sol', 'Welcome back');
@@ -286,7 +364,7 @@ export class Game {
     if (this.shotFrozen || this.shotStaging) return;
     const p = this.player;
     if (!p) return;
-    const ok = persist({
+    const ok = persistSave({
       version: 3,
       seed: this.seed,
       timeOfDay: this.timeOfDay,
@@ -318,7 +396,7 @@ export class Game {
         rewarded: this.collectibles.rewarded,
       },
       stunts: { best: this.bestStunt, count: this.stuntsCount, cash: this.stuntCash },
-      stats: { ...this.stats },
+      stats: { ...this.stats, photos: this.photoCount },
       flags: { endingSeen: this.missions.completedCount >= 5 },
     });
     if (ok) this.saveNotice = 2.2;
@@ -326,18 +404,18 @@ export class Game {
   }
 
   // =================================================================
-  // Loop
+  // Frame loop
   // =================================================================
   start() {
     this.running = true;
     this.lastFrame = performance.now();
-    requestAnimationFrame((t) => this.frame(t));
+    requestAnimationFrame((ts) => this.frame(ts));
   }
 
-  frame(ts) {
+  frame(timestamp) {
     if (!this.running) return;
-    const dt = Math.min(0.1, Math.max(0, (ts - this.lastFrame) / 1000));
-    this.lastFrame = ts;
+    const dt = Math.min(0.1, Math.max(0, (timestamp - this.lastFrame) / 1000));
+    this.lastFrame = timestamp;
     if (this.frameTimes.length > 240) this.frameTimes.shift();
     this.frameTimes.push(dt);
     if (!this.shotFrozen) {
@@ -352,7 +430,7 @@ export class Game {
     }
     this.render();
     this.input.endFrame();
-    requestAnimationFrame((t) => this.frame(t));
+    requestAnimationFrame((ts) => this.frame(ts));
   }
 
   update(dt) {
@@ -365,90 +443,204 @@ export class Game {
         this.audio.resume();
       }
     }
+
     this.worldTime += dt;
     this.sessionTime += dt;
     this.crimeCooldown = Math.max(0, this.crimeCooldown - dt);
     this.updateClock();
 
-    if (this.input.mute) {
-      this.consumePress('KeyM');
-      this.audio.toggleMute();
-      this.ui.mutedNotice = 1.8;
-    }
-    if (this.input.radio) {
-      this.consumePress('KeyQ');
-      const station = this.audio.cycleStation();
-      this.ui.radioVisible = 3.2;
-      this.ui.showToast(`Radio: ${station.name}`, 'neutral', 2.2);
-    }
-    if (this.input.mapToggle) {
-      this.consumePress('KeyT');
-      this.ui.showToast(`Clock ${this.clockLabel()} · ${WEATHER_CONFIG.labels[this.weather.type]} · minimap is always live`, 'neutral', 2.4);
-    }
-
-    const mouseStates = ['playing', 'dialogue', 'paused', 'missionComplete', 'missionFailed', 'wasted', 'busted'];
-    if (mouseStates.includes(this.state)) this.input.updateWorldMouse(this.camera);
-
-    switch (this.state) {
-      case 'title':
-        this.updateTitle(dt);
-        this.handleMenuInput();
-        break;
-      case 'controls':
-        this.updateAmbient(dt);
-        this.handleControlsInput();
-        break;
-      case 'playing':
-        this.updatePlaying(dt);
-        break;
-      case 'dialogue':
-        this.stateTimer += dt;
-        this.updateAmbientFrozen(dt);
-        if (this.stateTimer > 0.35 && (this.input.confirm || this.input.mouse.clicked || this.input.wasPressed('KeyE'))) {
-          this.dismissDialog();
-        } else if (this.stateTimer > 12) {
-          this.dismissDialog();
-        }
-        break;
-      case 'paused':
-        this.saveNotice = Math.max(0, this.saveNotice - dt);
-        this.handlePauseInput(dt);
-        break;
-      case 'missionComplete':
-        this.stateTimer += dt;
-        this.updateAmbientFrozen(dt);
-        if (this.input.confirm || this.input.mouse.clicked) this.continueAfterMission();
-        else if (this.stateTimer > 9) this.continueAfterMission();
-        break;
-      case 'missionFailed':
-        this.updateAmbientFrozen(dt);
-        this.handleMissionFailedInput();
-        break;
-      case 'wasted':
-      case 'busted':
-        this.stateTimer += dt;
-        this.updateAmbientFrozen(dt);
-        if (this.stateTimer >= this.stateDuration) this.finishRespawn();
-        break;
-      case 'ending':
-        this.updateAmbient(dt);
-        this.handleEndingInput();
-        break;
-      default:
-        break;
+    // Global keys.
+    if (this.state !== 'photo') {
+      if (this.input.mute) {
+        this.consumePress('KeyM');
+        this.audio.toggleMute();
+        this.ui.mutedNotice = 1.8;
+      }
+      if (this.input.radio) {
+        this.consumePress('KeyQ');
+        const station = this.audio.cycleStation();
+        this.ui.radioVisible = 3.2;
+        this.ui.showToast(`Radio: ${station.name}`, 'neutral', 2.2);
+      }
+      if (this.input.mapToggle) {
+        this.consumePress('KeyT');
+        this.ui.showToast(`Clock ${this.clockLabel()} · ${WEATHER_CONFIG.labels[this.weather.type]} · minimap is always live`, 'neutral', 2.4);
+      }
     }
 
-    if (['playing', 'dialogue', 'title', 'ending', 'missionComplete'].includes(this.state)) this.updateWeather(dt);
+    if (this.state === 'playing' && this.input.cameraZoom) {
+      this.consumePress('KeyZ');
+      this.enterPhoto();
+    }
+
+    if (PLAY_MODES.has(this.state) || MENU_MODES.has(this.state) || HUD_MODES.has(this.state)) {
+      this.input.updateWorldMouse(this.camera);
+    }
+
+    const handler = this.modes[this.state];
+    if (handler) handler(dt);
+
+    if (['playing', 'dialogue', 'title', 'ending', 'missionComplete'].includes(this.state)) {
+      this.updateWeather(dt);
+    }
     this.updateCamera(dt);
     this.ui.update(dt, this);
     this.updateDistrict();
+
     if (this.state === 'playing' || this.state === 'dialogue') {
       this.prompt = this.computePrompt();
       this.ui.prompt = this.prompt;
-    } else {
+    } else if (this.state !== 'photo') {
       this.prompt = '';
       this.ui.prompt = '';
     }
+  }
+
+  // =================================================================
+  // Mode handlers
+  // =================================================================
+  modeTitle(dt) {
+    this.titleDrift += dt * 0.12;
+    this.city.update(dt, this.worldTime);
+    this.traffic.update(dt, this.player, this.particles, this.audio, this.police, this);
+    for (const ped of this.combat.pedestrians) ped.update(dt, this.city, this.particles);
+    this.particles.update(dt);
+    this.handleMenuInput();
+  }
+
+  modeControls(dt) {
+    this.updateAmbient(dt);
+    this.handleControlsInput();
+  }
+
+  modePlaying(dt) {
+    if (this.input.pause) {
+      this.consumePress('Escape', 'KeyP');
+      this.enterMode('paused');
+      return;
+    }
+    this.city.update(dt, this.worldTime);
+    this.tickHotwire(dt);
+
+    const p = this.player;
+    if (p.isInVehicle && !p.hotwire) {
+      this.drivePlayer(dt);
+    } else if (!p.hotwire) {
+      p.update(dt, this.input, this.city, this.particles, this.audio);
+
+      const slot = this.input.weaponSlot;
+      if (slot >= 0) p.setWeapon(slot);
+      if (this.input.cycleWeapon !== 0) {
+        p.cycleWeapon(this.input.cycleWeapon);
+        this.input.mouse.wheel = 0;
+      }
+      if (this.input.reload) p.reload(this.audio);
+      if (this.input.grenade) {
+        this.consumePress('KeyG');
+        this.throwFrag();
+      }
+      if (this.input.mouse.down) this.combat.handlePlayerAttack(p, this.input, this.police, this.particles, this.audio, this);
+      if (this.input.enterVehicle) this.interact();
+      if (this.state !== 'playing') return;
+    }
+
+    this.missions.update(dt, p);
+    this.traffic.update(dt, p, this.particles, this.audio, this.police, this);
+    this.police.update(dt, p, this.particles, this.audio, this);
+    this.combat.update(dt, p, this.traffic, this.police, this.particles, this.audio, this);
+    this.pickups.update(dt, p, this);
+    this.collectibles.update(dt, p, this);
+    this.resolveCarContacts();
+    this.updateStunt(dt);
+    this.particles.update(dt);
+    this.updateHeatMusic();
+
+    if (p.isInVehicle && p.vehicle) {
+      const v = p.vehicle;
+      const ratio = Math.min(1, Math.abs(v.speed) / (v.config.topSpeed || 1));
+      const gear = 1 + Math.floor(ratio * 4);
+      this.audio.updateEngine(ratio, this.input.forward, this.input.backward, gear);
+      this.audio.setTireScreech(v.skidIntensity);
+      if (v.isDestroyed) this.traffic.exitVehicle(p, this.city, this.audio, this.ui);
+    } else {
+      this.audio.setTireScreech(0);
+      this.audio.stopEngine();
+    }
+
+    if (p.health <= 0 && this.state === 'playing') this.onWasted();
+  }
+
+  modeDialogue(dt) {
+    this.stateTimer += dt;
+    this.updateAmbientFrozen(dt);
+    const advance = this.input.confirm || this.input.mouse.clicked || this.input.wasPressed('KeyE');
+    if (this.stateTimer > 0.35 && advance) this.dismissDialog();
+    else if (this.stateTimer > 12) this.dismissDialog();
+  }
+
+  modePaused(dt) {
+    this.saveNotice = Math.max(0, this.saveNotice - dt);
+    this.handlePauseInput(dt);
+  }
+
+  modeMissionComplete(dt) {
+    this.stateTimer += dt;
+    this.updateAmbientFrozen(dt);
+    if (this.input.confirm || this.input.mouse.clicked) this.continueAfterMission();
+    else if (this.stateTimer > 9) this.continueAfterMission();
+  }
+
+  modeMissionFailed(dt) {
+    this.updateAmbientFrozen(dt);
+    this.handleMissionFailedInput();
+  }
+
+  modeFate(dt) {
+    this.stateTimer += dt;
+    this.updateAmbientFrozen(dt);
+    if (this.stateTimer >= this.stateDuration) this.finishRespawn();
+  }
+
+  modeEnding(dt) {
+    this.updateAmbient(dt);
+    this.handleEndingInput(dt);
+  }
+
+  modePhoto(dt) {
+    const photo = this.photo;
+    photo.cooldown = Math.max(0, (photo.cooldown || 0) - dt);
+    const speed = (460 / Math.max(0.8, photo.zoom)) * dt;
+    let dx = 0;
+    let dy = 0;
+    if (this.input.forward) dy -= 1;
+    if (this.input.backward) dy += 1;
+    if (this.input.left) dx -= 1;
+    if (this.input.right) dx += 1;
+    if (dx || dy) {
+      const len = Math.hypot(dx, dy) || 1;
+      photo.x += (dx / len) * speed;
+      photo.y += (dy / len) * speed;
+    }
+    if (this.input.mouse.wheel) {
+      photo.zoom = clamp(photo.zoom + this.input.mouse.wheel * 0.15, 0.85, 3.4);
+      this.input.mouse.wheel = 0;
+    }
+    photo.x = clamp(photo.x, -120, WORLD_SIZE + 120);
+    photo.y = clamp(photo.y, -120, WORLD_SIZE + 120);
+    photo.flash = Math.max(0, photo.flash - dt * 2.6);
+
+    if ((this.input.confirm || this.input.mouse.clicked) && photo.cooldown <= 0) {
+      this.input.mouse.clicked = false;
+      this.input.keysPressed.delete('Enter');
+      this.input.keysPressed.delete('Space');
+      this.capturePhoto();
+      photo.cooldown = 0.4;
+    }
+    if (this.input.pause || this.input.wasPressed('KeyZ')) {
+      this.consumePress('Escape', 'KeyP', 'KeyZ');
+      this.exitPhoto();
+    }
+    if (this.ui) this.ui.photoFlash = photo.flash;
   }
 
   // =================================================================
@@ -466,22 +658,34 @@ export class Game {
     return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
   }
 
+  weatherLabel() {
+    return WEATHER_CONFIG.labels[this.weather.type] || 'CLEAR';
+  }
+
   updateWeather(dt) {
     const w = this.weather;
+    if (!w) return;
     w.timer -= dt;
     w.windPhase = (w.windPhase || 0) + dt * 0.4;
+    w.front = (w.front + dt * 0.02) % 1;
+
     if (w.timer <= 0) {
       w.next = pick(this.weatherRng, WEATHER_CONFIG.types);
       w.timer = WEATHER_CONFIG.minSeconds + this.weatherRng() * (WEATHER_CONFIG.maxSeconds - WEATHER_CONFIG.minSeconds);
       w.type = w.next;
-      w.wind = 0.2 + this.weatherRng() * 0.6;
+      w.targetWind = 0.18 + this.weatherRng() * 0.65;
       if (w.type === 'storm') w.timer *= 0.72;
     }
-    const targetIntensity = WEATHER_CONFIG.rainIntensity[w.type] || 0;
-    w.intensity += (targetIntensity - w.intensity) * Math.min(1, dt * 0.35);
+
+    w.targetIntensity = WEATHER_CONFIG.rainIntensity[w.type] || 0;
+    const ease = Math.min(1, dt * 0.32);
+    w.intensity += (w.targetIntensity - w.intensity) * ease;
+    w.wind += (w.targetWind - w.wind) * Math.min(1, dt * 0.22);
+    w.gust = 0.5 + 0.5 * Math.sin((w.windPhase || 0) * 2.1);
+
     if (w.type === 'rain' || w.type === 'storm') {
       w.wetness = Math.min(1, w.wetness + dt * WEATHER_CONFIG.wetnessRise * (0.5 + w.intensity));
-      if (w.type === 'storm' && w.flash <= 0 && this.weatherRng() < dt * 0.09) {
+      if (w.type === 'storm' && w.flash <= 0 && !this.shotStaging && this.weatherRng() < dt * 0.09) {
         w.flash = 1;
         this.audio.playThunder();
         this.camera.shake = Math.max(this.camera.shake, 0.25);
@@ -490,8 +694,10 @@ export class Game {
       w.wetness = Math.max(0, w.wetness - dt * WEATHER_CONFIG.wetnessDry);
     }
     w.flash = Math.max(0, w.flash - dt * 2.6);
+
     this.audio.setRain((w.type === 'rain' || w.type === 'storm') ? w.intensity : 0);
     this.audio.setWind(w.wind + (w.type === 'storm' ? 0.3 : 0));
+
     if ((w.type === 'rain' || w.type === 'storm') && this.state === 'playing' && Math.random() < dt * 12 * w.intensity) {
       const x = this.camera.x + (Math.random() - 0.5) * (1280 / this.camera.zoom);
       const y = this.camera.y + (Math.random() - 0.5) * (720 / this.camera.zoom);
@@ -502,122 +708,31 @@ export class Game {
   setWeather(type, intensity = null) {
     if (!this.weather) return;
     this.weather.type = type;
-    this.weather.intensity = intensity ?? (WEATHER_CONFIG.rainIntensity[type] || 0);
-    this.weather.timer = 90;
     this.weather.next = type;
-    if (type === 'rain' || type === 'storm') this.weather.wetness = Math.max(this.weather.wetness, type === 'storm' ? 0.85 : 0.55);
-    else this.weather.wetness = Math.max(0, this.weather.wetness - 0.2);
+    this.weather.intensity = intensity ?? (WEATHER_CONFIG.rainIntensity[type] || 0);
+    this.weather.targetIntensity = this.weather.intensity;
+    this.weather.timer = 90;
+    if (type === 'rain' || type === 'storm') {
+      this.weather.wetness = Math.max(this.weather.wetness, type === 'storm' ? 0.85 : 0.55);
+    } else {
+      this.weather.wetness = Math.max(0, this.weather.wetness - 0.2);
+    }
     this.audio.setRain(WEATHER_CONFIG.rainIntensity[type] || 0);
   }
 
-  weatherLabel() {
-    return WEATHER_CONFIG.labels[this.weather.type] || 'CLEAR';
-  }
-
   // =================================================================
-  // Playing
+  // Driving, interaction, stunts
   // =================================================================
-  updatePlaying(dt) {
-    if (this.input.pause) {
-      this.consumePress('Escape', 'KeyP');
-      this.state = 'paused';
-      this.ui.menuIndex = 0;
-      this.audio.setTireScreech(0);
-      return;
-    }
-    this.city.update(dt, this.worldTime);
-    this.tickHotwire(dt);
-
-    if (this.player.isInVehicle && !this.player.hotwire) {
-      this.drivePlayerVehicle(dt);
-    } else if (!this.player.hotwire) {
-      this.player.update(dt, this.input, this.city, this.particles, this.audio);
-
-      const slot = this.input.weaponSlot;
-      if (slot >= 0) this.player.setWeapon(slot);
-      const wheel = this.input.cycleWeapon;
-      if (wheel !== 0) {
-        this.player.cycleWeapon(wheel);
-        this.input.mouse.wheel = 0;
-      }
-      if (this.input.reload) this.player.reload(this.audio);
-
-      if (this.input.grenade) {
-        this.consumePress('KeyG');
-        this.throwGrenade();
-      }
-      if (this.input.mouse.down) this.combat.handlePlayerAttack(this.player, this.input, this.police, this.particles, this.audio, this);
-      if (this.input.enterVehicle) this.interact();
-      if (this.state !== 'playing') return;
-    }
-
-    this.missions.update(dt, this.player);
-    this.traffic.update(dt, this.player, this.particles, this.audio, this.police, this);
-    this.police.update(dt, this.player, this.particles, this.audio, this);
-    this.combat.update(dt, this.player, this.traffic, this.police, this.particles, this.audio, this);
-    this.pickups.update(dt, this.player, this);
-    this.collectibles.update(dt, this.player, this);
-    this.resolveVehicleCollisions(dt);
-    this.updateStunt(dt);
-    this.particles.update(dt);
-    this.updateHeatMusic();
-
-    if (this.player.isInVehicle && this.player.vehicle) {
-      const v = this.player.vehicle;
-      const ratio = Math.min(1, Math.abs(v.speed) / (v.config.topSpeed || 1));
-      const gear = 1 + Math.floor(ratio * 4);
-      this.audio.updateEngine(ratio, this.input.forward, this.input.backward, gear);
-      this.audio.setTireScreech(v.skidIntensity);
-      if (v.isDestroyed) this.traffic.exitVehicle(this.player, this.city, this.audio, this.ui);
-    } else {
-      this.audio.setTireScreech(0);
-      this.audio.stopEngine();
-    }
-
-    if (this.player.health <= 0 && this.state === 'playing') this.onWasted();
-  }
-
-  updateHeatMusic() {
-    const stars = this.police.wantedStars;
-    const mission = this.missions.active ? 1 : 0;
-    this.audio.setMusicIntensity(stars >= 4 ? 3 : stars >= 2 ? 2 : stars > 0 ? 1 : mission ? 1 : 0);
-  }
-
-  updateAmbient(dt) {
-    this.city.update(dt, this.worldTime);
-    this.traffic.update(dt, this.player, this.particles, this.audio, this.police, this);
-    for (const p of this.combat.pedestrians) p.update(dt, this.city, this.particles);
-    this.particles.update(dt);
-  }
-
-  updateAmbientFrozen(dt) {
-    this.particles.update(dt);
-    this.audio.setTireScreech(0);
-    if (this.weather?.flash > 0) this.weather.flash = Math.max(0, this.weather.flash - dt * 2.6);
-  }
-
-  updateTitle(dt) {
-    this.titleDrift += dt * 0.12;
-    this.city.update(dt, this.worldTime);
-    this.traffic.update(dt, this.player, this.particles, this.audio, this.police, this);
-    for (const p of this.combat.pedestrians) p.update(dt, this.city, this.particles);
-    this.particles.update(dt);
-  }
-
-  // =================================================================
-  // Driving, stunts and interaction
-  // =================================================================
-  drivePlayerVehicle(dt) {
-    const v = this.player.vehicle;
+  drivePlayer(dt) {
+    const p = this.player;
+    const v = p.vehicle;
     if (!v || v.isDestroyed) return;
-    this.player.tickTimers(dt);
-    const forward = this.input.forward;
-    const back = this.input.backward;
+    p.tickTimers(dt);
     const steer = (this.input.right ? 1 : 0) - (this.input.left ? 1 : 0);
     v.handbrake = this.input.handbrake;
     v.steer(steer);
-    if (forward) v.accelerate(1, dt);
-    else if (back) {
+    if (this.input.forward) v.accelerate(1, dt);
+    else if (this.input.backward) {
       if (v.speed > 40) v.brake(0.9, dt);
       else v.accelerate(-0.75, dt);
     }
@@ -627,30 +742,29 @@ export class Game {
       this.audio.playHorn(0.8);
     }
     v.update(dt, this.city, this.particles, this.audio, { wetness: this.weather.wetness });
-    this.player.x = v.x;
-    this.player.y = v.y;
-    this.player.angle = v.angle;
-    this.player.vx = v.vx;
-    this.player.vy = v.vy;
+    p.x = v.x;
+    p.y = v.y;
+    p.angle = v.angle;
+    p.vx = v.vx;
+    p.vy = v.vy;
     if (v.impactPulse > 0.2) this.camera.shake = Math.max(this.camera.shake, v.impactPulse * 0.55);
 
     if (this.input.grenade) {
       this.consumePress('KeyG');
-      this.throwGrenade();
+      this.throwFrag();
     }
-    if (this.input.mouse.down) this.combat.handlePlayerAttack(this.player, this.input, this.police, this.particles, this.audio, this);
-    if (this.input.reload) this.player.reload(this.audio);
+    if (this.input.mouse.down) this.combat.handlePlayerAttack(p, this.input, this.police, this.particles, this.audio, this);
+    if (this.input.reload) p.reload(this.audio);
     const slot = this.input.weaponSlot;
-    if (slot >= 0) this.player.setWeapon(slot);
-    const wheel = this.input.cycleWeapon;
-    if (wheel !== 0) {
-      this.player.cycleWeapon(wheel);
+    if (slot >= 0) p.setWeapon(slot);
+    if (this.input.cycleWeapon !== 0) {
+      p.cycleWeapon(this.input.cycleWeapon);
       this.input.mouse.wheel = 0;
     }
     if (this.input.enterVehicle) this.interact();
   }
 
-  throwGrenade() {
+  throwFrag() {
     if (this.combat.throwPlayerGrenade(this.player, this.audio)) {
       this.audio.playGrenadePin();
       this.ui.showToast('Frag out!', 'warning', 1.2);
@@ -661,136 +775,117 @@ export class Game {
   }
 
   tickHotwire(dt) {
-    const h = this.player.hotwire;
-    if (!h) return;
-    this.player.tickTimers(dt);
-    const v = h.vehicle;
-    if (!v || v.isDestroyed) {
-      this.player.hotwire = null;
+    const p = this.player;
+    const job = p.hotwire;
+    if (!job) return;
+    p.tickTimers(dt);
+    const car = job.vehicle;
+    if (!car || car.isDestroyed) {
+      p.hotwire = null;
       this.ui.showToast('Hotwire failed - the car is wrecked.', 'danger', 2);
       return;
     }
-    v.brake(1, dt);
-    h.timer -= dt;
-    if (h.timer <= 0) {
-      const side = v.angle + Math.PI / 2;
-      const ped = this.combat.spawnPedestrianAt(v.x + Math.cos(side) * 34, v.y + Math.sin(side) * 34);
-      ped.fleeFrom(v.x, v.y);
-      ped.speed = 175;
-      ped.state = 'flee';
-      ped.panicTimer = 5;
-      v.driver = null;
-      v.occupiedByCivilian = false;
-      this.traffic.completeEnter(this.player, v, this.audio, this.ui, this.police);
-      this.ui.showToast('Carjacked!', 'warning', 2.2);
-      this.camera.shake = Math.max(this.camera.shake, 0.28);
-    }
+    car.brake(1, dt);
+    job.timer -= dt;
+    if (job.timer > 0) return;
+
+    const side = car.angle + Math.PI / 2;
+    const driver = this.combat.spawnPedestrianAt(car.x + Math.cos(side) * 34, car.y + Math.sin(side) * 34);
+    driver.fleeFrom(car.x, car.y);
+    driver.speed = 175;
+    driver.state = 'flee';
+    driver.panicTimer = 5;
+    car.driver = null;
+    car.occupiedByCivilian = false;
+    this.traffic.completeEnter(p, car, this.audio, this.ui, this.police);
+    this.ui.showToast('Carjacked!', 'warning', 2.2);
+    this.camera.shake = Math.max(this.camera.shake, 0.28);
   }
 
-  updateStunt(dt) {
-    const v = this.player.vehicle;
-    if (this.stunt) {
-      this.stunt.time += dt;
-      const p = clamp(this.stunt.time / this.stunt.target, 0, 1);
-      if (v) v.airHeight = Math.sin(p * Math.PI) * (18 + this.stunt.speed * 0.018);
-      if (this.stunt.time >= this.stunt.target) {
-        const air = this.stunt.time;
-        const landedCar = v;
-        if (landedCar) {
-          landedCar.airborne = false;
-          landedCar.airHeight = 0;
-          landedCar.stuntCooldown = 1.4;
-          this.particles.spawnStuntDust(landedCar.x, landedCar.y, landedCar.angle);
-        }
-        if (landedCar && !landedCar.isDestroyed && !landedCar.isBurning && this.player.health > 0) {
-          const clean = air > 0.55;
-          const cash = Math.round((clean ? STUNT_CONFIG.cleanBonus : 0) + air * STUNT_CONFIG.cashPerSecond + this.stunt.speed * 0.12);
-          this.player.money += cash;
-          this.player.score += STUNT_CONFIG.stuntScore;
-          this.stuntsCount += 1;
-          this.stuntCash += cash;
-          this.bestStunt = Math.max(this.bestStunt, air);
-          this.ui.showStunt(`${this.stunt.ramp?.name || 'STUNT'}${clean ? ' · CLEAN' : ''}`, cash, air);
-          this.audio.playStunt();
-          this.camera.shake = Math.max(this.camera.shake, 0.4);
-          if (air > 1.25) this.ui.showToast('Big air! The city noticed.', 'success', 2.4);
-        }
-        this.stunt = null;
-        return;
+  describeInteraction() {
+    const p = this.player;
+    if (p.hotwire) return { kind: 'hotwire', label: 'HOTWIRING...' };
+    if (p.isInVehicle && p.vehicle) {
+      const garage = this.city.nearestGarage(p.x, p.y, GARAGE_CONFIG.radius);
+      if (garage && (p.vehicle.hp < p.vehicle.maxHp || p.vehicle.isBurning)) {
+        const cost = p.vehicle.hp < p.vehicle.maxHp * 0.4 || p.vehicle.isBurning
+          ? GARAGE_CONFIG.fullRepairCost
+          : GARAGE_CONFIG.repairCost;
+        return { kind: 'repair', garage, label: `REPAIR ${p.vehicle.config.name.toUpperCase()} - $${cost}` };
+      }
+      return { kind: 'exit', label: `EXIT ${p.vehicle.config.name.toUpperCase()}` };
+    }
+    const marker = this.missions.availableMarker();
+    if (marker && Math.hypot(p.x - marker.x, p.y - marker.y) < marker.radius + 46) {
+      return { kind: 'job', marker, label: `START JOB - ${marker.mission.title.toUpperCase()}` };
+    }
+    const vehicle = this.traffic.findNearestVehicle(p.x, p.y, 80);
+    if (vehicle) {
+      return {
+        kind: 'vehicle', vehicle,
+        label: `${vehicle.occupiedByCivilian ? 'CARJACK' : 'STEAL'} ${vehicle.config.name.toUpperCase()}`,
+      };
+    }
+    let nearPed = null;
+    let nearDist = 50;
+    for (const ped of this.combat.pedestrians) {
+      if (ped.isDead || ped.robbed) continue;
+      const d = Math.hypot(p.x - ped.x, p.y - ped.y);
+      if (d < nearDist) {
+        nearDist = d;
+        nearPed = ped;
       }
     }
-    if (!v || v.isDestroyed || v.isBurning) return;
-    if (this.stunt || v.stuntCooldown > 0) return;
-    const speed = Math.hypot(v.vx, v.vy);
-    if (speed < STUNT_CONFIG.minSpeed) return;
-    const ramp = this.city.rampAt(v.x, v.y, 46);
-    if (!ramp) return;
-    const fx = Math.cos(v.angle);
-    const fy = Math.sin(v.angle);
-    const dot = (v.vx * Math.cos(ramp.angle) + v.vy * Math.sin(ramp.angle)) / Math.max(1, speed);
-    if (dot < 0.55) return;
-    const target = clamp(speed / 360, 0.6, STUNT_CONFIG.maxAir);
-    this.stunt = { time: 0, target, ramp, speed, clean: false };
-    v.airborne = true;
-    v.airHeight = 0;
-    v.stuntCooldown = 1.4;
-    this.audio.playSplash();
-    this.particles.spawnStuntDust(v.x, v.y, v.angle);
-    this.camera.shake = Math.max(this.camera.shake, 0.32);
-    this.ui.showToast(`${ramp.name} - hold the wheel!`, 'warning', 1.6);
-    void fx;
-    void fy;
+    if (nearPed) return { kind: 'rob', ped: nearPed, label: 'ROB PEDESTRIAN' };
+    const garage = this.city.nearestGarage(p.x, p.y, GARAGE_CONFIG.radius);
+    if (garage) return { kind: 'garage', garage, label: `GARAGE - ${garage.garage.name.toUpperCase()}` };
+    if (p.isReloading) return { kind: 'reload', label: 'RELOADING...' };
+    return { kind: 'none', label: '' };
   }
 
   interact() {
     this.consumePress('KeyE', 'KeyF');
     const p = this.player;
     if (p.hotwire) return;
-    if (p.isInVehicle) {
-      const garage = this.city.nearestGarage(p.x, p.y, GARAGE_CONFIG.radius);
-      if (garage && p.vehicle) {
-        this.repairAtGarage(garage);
-        return;
-      }
+    const target = this.describeInteraction();
+    if (target.kind === 'repair') {
+      this.repairAtGarage(target.garage);
+      return;
+    }
+    if (target.kind === 'exit') {
       this.traffic.exitVehicle(p, this.city, this.audio, this.ui);
       return;
     }
-    const marker = this.missions.availableMarker();
-    if (marker && Math.hypot(p.x - marker.x, p.y - marker.y) < marker.radius + 46) {
-      this.missions.start(marker.index);
+    if (target.kind === 'job') {
+      this.missions.start(target.marker.index);
       return;
     }
-    const vehicle = this.traffic.findNearestVehicle(p.x, p.y, 80);
-    if (vehicle) {
-      const speed = Math.hypot(vehicle.vx, vehicle.vy);
-      const maxJackSpeed = vehicle.occupiedByCivilian ? 270 : 330;
-      if (speed > maxJackSpeed) {
+    if (target.kind === 'vehicle') {
+      const car = target.vehicle;
+      const speed = Math.hypot(car.vx, car.vy);
+      const limit = car.occupiedByCivilian ? 270 : 330;
+      if (speed > limit) {
         this.ui.showToast('Too fast - slow the car down.', 'warning', 2);
         return;
       }
-      this.traffic.enterVehicle(p, vehicle, this.audio, this.ui, this.police);
+      this.traffic.enterVehicle(p, car, this.audio, this.ui, this.police);
       return;
     }
-    let nearestPed = null;
-    let pd = 50;
-    for (const ped of this.combat.pedestrians) {
-      if (ped.isDead || ped.robbed) continue;
-      const d = Math.hypot(p.x - ped.x, p.y - ped.y);
-      if (d < pd) {
-        pd = d;
-        nearestPed = ped;
-      }
-    }
-    if (nearestPed) {
-      nearestPed.robbed = true;
+    if (target.kind === 'rob') {
+      const ped = target.ped;
+      ped.robbed = true;
       const cash = ECONOMY.robberyMin + Math.floor(Math.random() * (ECONOMY.robberyMax - ECONOMY.robberyMin));
       p.money += cash;
       p.score += 15;
-      nearestPed.fleeFrom(p.x, p.y);
+      ped.fleeFrom(p.x, p.y);
       this.audio.playCash();
       this.ui.showToast(`Robbed ${cash}. Somebody is calling it in.`, 'warning', 2.8);
       this.onCrime('robbery', 1);
     }
+  }
+
+  computePrompt() {
+    return this.describeInteraction().label;
   }
 
   repairAtGarage(entry) {
@@ -816,7 +911,57 @@ export class Game {
     this.autosave();
   }
 
-  resolveVehicleCollisions(dt) {
+  updateStunt(dt) {
+    const v = this.player.vehicle;
+    if (this.stunt) {
+      this.stunt.time += dt;
+      const progress = clamp(this.stunt.time / this.stunt.target, 0, 1);
+      if (v) v.airHeight = Math.sin(progress * Math.PI) * (18 + this.stunt.speed * 0.018);
+      if (this.stunt.time >= this.stunt.target) {
+        const air = this.stunt.time;
+        if (v) {
+          v.airborne = false;
+          v.airHeight = 0;
+          v.stuntCooldown = 1.4;
+          this.particles.spawnStuntDust(v.x, v.y, v.angle);
+        }
+        if (v && !v.isDestroyed && !v.isBurning && this.player.health > 0) {
+          const clean = air > 0.55;
+          const cash = Math.round((clean ? STUNT_CONFIG.cleanBonus : 0) + air * STUNT_CONFIG.cashPerSecond + this.stunt.speed * 0.12);
+          this.player.money += cash;
+          this.player.score += STUNT_CONFIG.stuntScore;
+          this.stuntsCount += 1;
+          this.stuntCash += cash;
+          this.bestStunt = Math.max(this.bestStunt, air);
+          this.ui.showStunt(`${this.stunt.ramp?.name || 'STUNT'}${clean ? ' · CLEAN' : ''}`, cash, air);
+          this.audio.playStunt();
+          this.camera.shake = Math.max(this.camera.shake, 0.4);
+          if (air > 1.25) this.ui.showToast('Big air! The city noticed.', 'success', 2.4);
+        }
+        this.stunt = null;
+        return;
+      }
+    }
+    if (!v || v.isDestroyed || v.isBurning) return;
+    if (this.stunt || v.stuntCooldown > 0) return;
+    const speed = Math.hypot(v.vx, v.vy);
+    if (speed < STUNT_CONFIG.minSpeed) return;
+    const ramp = this.city.rampAt(v.x, v.y, 46);
+    if (!ramp) return;
+    const dot = (v.vx * Math.cos(ramp.angle) + v.vy * Math.sin(ramp.angle)) / Math.max(1, speed);
+    if (dot < 0.55) return;
+    const target = clamp(speed / 360, 0.6, STUNT_CONFIG.maxAir);
+    this.stunt = { time: 0, target, ramp, speed };
+    v.airborne = true;
+    v.airHeight = 0;
+    v.stuntCooldown = 1.4;
+    this.audio.playSplash();
+    this.particles.spawnStuntDust(v.x, v.y, v.angle);
+    this.camera.shake = Math.max(this.camera.shake, 0.32);
+    this.ui.showToast(`${ramp.name} - hold the wheel!`, 'warning', 1.6);
+  }
+
+  resolveCarContacts() {
     const cars = this.allVehicles();
     for (let i = 0; i < cars.length; i += 1) {
       const a = cars[i];
@@ -832,20 +977,18 @@ export class Game {
         const nx = dx / dist;
         const ny = dy / dist;
         const overlap = min - dist;
-        const aMass = a.config.mass;
-        const bMass = b.config.mass;
-        const total = aMass + bMass;
-        a.x -= nx * overlap * (bMass / total);
-        a.y -= ny * overlap * (bMass / total);
-        b.x += nx * overlap * (aMass / total);
-        b.y += ny * overlap * (aMass / total);
+        const total = a.config.mass + b.config.mass;
+        a.x -= nx * overlap * (b.config.mass / total);
+        a.y -= ny * overlap * (b.config.mass / total);
+        b.x += nx * overlap * (a.config.mass / total);
+        b.y += ny * overlap * (a.config.mass / total);
         const rel = Math.hypot(a.vx - b.vx, a.vy - b.vy);
         if (rel > 90) {
           const push = rel * 0.32;
-          a.vx -= nx * push * (bMass / total);
-          a.vy -= ny * push * (bMass / total);
-          b.vx += nx * push * (aMass / total);
-          b.vy += ny * push * (aMass / total);
+          a.vx -= nx * push * (b.config.mass / total);
+          a.vy -= ny * push * (b.config.mass / total);
+          b.vx += nx * push * (a.config.mass / total);
+          b.vy += ny * push * (a.config.mass / total);
           const damage = rel * 0.035;
           a.takeDamage(damage, this.particles, this.audio);
           b.takeDamage(damage, this.particles, this.audio);
@@ -862,14 +1005,14 @@ export class Game {
         if (v.isDestroyed) continue;
         const speed = Math.hypot(v.vx, v.vy);
         if (speed < 150) continue;
-        if (Math.hypot(v.x - this.player.x, v.y - this.player.y) < Math.max(v.width, v.length) * 0.5 + this.player.radius * 0.5) {
+        const reach = Math.max(v.width, v.length) * 0.5 + this.player.radius * 0.5;
+        if (Math.hypot(v.x - this.player.x, v.y - this.player.y) < reach) {
           this.player.takeDamage(55, this.particles, this.audio, Math.atan2(v.vy, v.vx));
           this.onPlayerHurt();
           this.camera.shake = Math.max(this.camera.shake, 0.7);
         }
       }
     }
-    void dt;
   }
 
   allVehicles() {
@@ -877,11 +1020,33 @@ export class Game {
   }
 
   // =================================================================
-  // Events
+  // Ambient updates
+  // =================================================================
+  updateHeatMusic() {
+    const stars = this.police.wantedStars;
+    const mission = this.missions.active ? 1 : 0;
+    this.audio.setMusicIntensity(stars >= 4 ? 3 : stars >= 2 ? 2 : stars > 0 ? 1 : mission ? 1 : 0);
+  }
+
+  updateAmbient(dt) {
+    this.city.update(dt, this.worldTime);
+    this.traffic.update(dt, this.player, this.particles, this.audio, this.police, this);
+    for (const ped of this.combat.pedestrians) ped.update(dt, this.city, this.particles);
+    this.particles.update(dt);
+  }
+
+  updateAmbientFrozen(dt) {
+    this.particles.update(dt);
+    this.audio.setTireScreech(0);
+    if (this.weather?.flash > 0) this.weather.flash = Math.max(0, this.weather.flash - dt * 2.6);
+  }
+
+  // =================================================================
+  // Crime and event flow
   // =================================================================
   onCrime(kind, severity = 1) {
     if (this.state !== 'playing') return;
-    const prev = this.police.wantedStars;
+    const before = this.police.wantedStars;
     let add = 0;
     if (kind === 'cop') add = 2;
     else if (kind === 'vehicular') add = 2;
@@ -891,6 +1056,7 @@ export class Game {
     else if (kind === 'assault') add = 1;
     else if (kind === 'gunfire') add = 1;
     this.stats.crimes += 1;
+
     if (this.police.wantedStars === 0) {
       this.police.setWanted(Math.min(5, Math.max(1, add || severity)));
     } else if (kind === 'cop' || kind === 'explosion') {
@@ -898,7 +1064,8 @@ export class Game {
     } else if (this.crimeCooldown <= 0 && add > 0) {
       this.police.raiseWanted(1);
     }
-    if (this.police.wantedStars > prev && this.crimeCooldown <= 0) {
+
+    if (this.police.wantedStars > before && this.crimeCooldown <= 0) {
       this.crimeCooldown = 4;
       this.ui.showToast(`WANTED - ${this.police.wantedStars} star${this.police.wantedStars === 1 ? '' : 's'}`, 'danger', 2.4);
       this.audio.playSirenChirp(this.police.wantedStars);
@@ -906,14 +1073,14 @@ export class Game {
   }
 
   notifyGunfire(x, y) {
-    for (const p of this.combat.pedestrians) {
-      if (!p.isDead) p.panic(x, y, 400);
+    for (const ped of this.combat.pedestrians) {
+      if (!ped.isDead) ped.panic(x, y, 400);
     }
     this.traffic.panicAt(x, y, 360);
     let witness = this.police.witnessedCarjack(x, y);
     if (!witness) {
-      for (const p of this.combat.pedestrians) {
-        if (!p.isDead && Math.hypot(p.x - x, p.y - y) < 300) {
+      for (const ped of this.combat.pedestrians) {
+        if (!ped.isDead && Math.hypot(ped.x - x, ped.y - y) < 300) {
           witness = true;
           break;
         }
@@ -949,6 +1116,9 @@ export class Game {
     this.autosave();
   }
 
+  // =================================================================
+  // Dialogue and mission callbacks
+  // =================================================================
   showChatter(speaker, text, duration = 5) {
     this.ui.showChatter(speaker, text, Math.min(7, duration));
   }
@@ -956,8 +1126,7 @@ export class Game {
   showDialog(speaker, text, portrait = null) {
     this.ui.showDialog(speaker, text, portrait);
     this.dialogueReturn = 'playing';
-    this.state = 'dialogue';
-    this.stateTimer = 0;
+    this.enterMode('dialogue');
     this.audio.playPickup();
   }
 
@@ -989,10 +1158,7 @@ export class Game {
 
   dismissDialog() {
     if (this.state !== 'dialogue') return;
-    this.input.keysPressed.delete('Space');
-    this.input.keysPressed.delete('Enter');
-    this.input.keysPressed.delete('KeyE');
-    this.input.keysPressed.delete('KeyF');
+    for (const code of ['Space', 'Enter', 'KeyE', 'KeyF']) this.input.keysPressed.delete(code);
     this.input.mouse.clicked = false;
     if (this.dialogueQueue.length && this.dialogueIndex < this.dialogueQueue.length - 1) {
       this.dialogueIndex += 1;
@@ -1016,8 +1182,7 @@ export class Game {
     this.stats.jobs += 1;
     this.missionComplete = { def, reward, final };
     this.missionFailed = null;
-    this.state = 'missionComplete';
-    this.stateTimer = 0;
+    this.enterMode('missionComplete');
     this.ui.banner = null;
     this.ui.toasts = [];
     this.ui.objectiveHint = '';
@@ -1033,47 +1198,51 @@ export class Game {
     this.input.keysPressed.delete('Space');
     this.input.mouse.clicked = false;
     if (wasFinal) {
-      this.state = 'ending';
-      this.stateTimer = 0;
-      this.ui.menuIndex = 0;
+      this.enterMode('ending');
       this.audio.playMissionPass();
       this.autosave();
-    } else {
-      this.state = 'playing';
-      this.stateTimer = 0;
-      this.ui.menuIndex = 0;
-      this.missionComplete = null;
-      if (this.missions.currentIndex < this.missions.defs.length) {
-        this.ui.showToast(`Next marker: ${this.missions.defs[this.missions.currentIndex].title}`, 'neutral', 3.4);
-      }
+      return;
+    }
+    this.enterMode('playing');
+    this.missionComplete = null;
+    if (this.missions.currentIndex < this.missions.defs.length) {
+      this.ui.showToast(`Next marker: ${this.missions.defs[this.missions.currentIndex].title}`, 'neutral', 3.4);
     }
   }
 
   onMissionFailed(def, reason) {
     this.missionFailed = { def, reason };
-    this.state = 'missionFailed';
+    this.enterMode('missionFailed');
     this.audio.playMissionFail();
     this.audio.setPoliceSiren(false, 0);
-    this.ui.menuIndex = 0;
     this.ui.banner = null;
     this.ui.toasts = [];
     this.ui.objectiveHint = '';
     this.input.mouse.clicked = false;
   }
 
-  onWasted() {
-    if (this.wastedTriggered || this.state === 'wasted' || this.state === 'busted') return;
-    this.wastedTriggered = true;
-    this.state = 'wasted';
-    this.stateTimer = 0;
-    this.stateDuration = 3.6;
+  beginFate(kind) {
+    const wasted = kind === 'wasted';
+    if (wasted ? (this.wastedTriggered || this.state === 'wasted' || this.state === 'busted') : (this.bustedTriggered || this.state === 'busted' || this.state === 'wasted')) {
+      return;
+    }
+    if (!wasted && this.player.health <= 0) return;
+    if (wasted) this.wastedTriggered = true;
+    else this.bustedTriggered = true;
+
+    this.enterMode(wasted ? 'wasted' : 'busted', { duration: 3.7 });
+    this.stateDuration = 3.7;
     this.ui.banner = null;
     this.ui.toasts = [];
     this.audio.setPoliceSiren(false, 0);
     this.audio.stopEngine();
+
     if (this.missions.active) {
-      this.pendingFail = { index: this.missions.currentIndex, reason: 'You were wasted.' };
-      this.missions.failSilent('You were wasted.');
+      this.pendingFail = {
+        index: this.missions.currentIndex,
+        reason: wasted ? 'You were wasted.' : 'You were busted.',
+      };
+      this.missions.failSilent(wasted ? 'You were wasted.' : 'You were busted.');
     }
     if (this.player.isInVehicle) {
       const v = this.player.vehicle;
@@ -1083,62 +1252,45 @@ export class Game {
       v.aiMode = 'parked';
       this.player.vehicle = null;
     }
-    const fee = WANTED_CONFIG.wastedFee;
-    this.player.money = Math.max(0, this.player.money - fee);
-    this.player.health = 0;
+    if (wasted) {
+      this.player.money = Math.max(0, this.player.money - WANTED_CONFIG.wastedFee);
+      this.player.health = 0;
+    } else {
+      this.player.money = Math.max(0, this.player.money - WANTED_CONFIG.bustedFine);
+      this.player.health = Math.max(1, this.player.health);
+    }
     this.police.clearWanted();
   }
 
+  onWasted() {
+    this.beginFate('wasted');
+  }
+
   onBusted() {
-    if (this.bustedTriggered || this.state === 'busted' || this.state === 'wasted') return;
-    if (this.player.health <= 0) return;
-    this.bustedTriggered = true;
-    this.state = 'busted';
-    this.stateTimer = 0;
-    this.stateDuration = 3.6;
-    this.ui.banner = null;
-    this.ui.toasts = [];
-    this.audio.setPoliceSiren(false, 0);
-    this.audio.stopEngine();
-    if (this.missions.active) {
-      this.pendingFail = { index: this.missions.currentIndex, reason: 'You were busted.' };
-      this.missions.failSilent('You were busted.');
-    }
-    if (this.player.isInVehicle) {
-      const v = this.player.vehicle;
-      this.lastVehicle = v;
-      v.driver = null;
-      v.isPlayerVehicle = false;
-      v.aiMode = 'parked';
-      this.player.vehicle = null;
-    }
-    const fee = WANTED_CONFIG.bustedFine;
-    this.player.money = Math.max(0, this.player.money - fee);
-    this.player.health = Math.max(1, this.player.health);
-    this.police.clearWanted();
+    this.beginFate('busted');
   }
 
   finishRespawn() {
     const busted = this.state === 'busted';
-    const point = busted
-      ? { x: this.city.landmarks.policeStation.x, y: this.city.landmarks.policeStation.y + 106 }
-      : { x: this.city.landmarks.hospital.x, y: this.city.landmarks.hospital.y + 106 };
-    this.player.x = point.x;
-    this.player.y = point.y;
-    this.player.vx = 0;
-    this.player.vy = 0;
-    this.player.health = this.player.maxHealth;
-    this.player.armor = busted ? 50 : 0;
-    this.player.isRolling = false;
-    this.player.hotwire = null;
-    this.player.grenades = Math.max(this.player.grenades, 1);
+    const landmark = busted ? this.city.landmarks.policeStation : this.city.landmarks.hospital;
+    const point = { x: landmark.x, y: landmark.y + 106 };
+    const p = this.player;
+    p.x = point.x;
+    p.y = point.y;
+    p.vx = 0;
+    p.vy = 0;
+    p.health = p.maxHealth;
+    p.armor = busted ? 50 : 0;
+    p.isRolling = false;
+    p.hotwire = null;
+    p.grenades = Math.max(p.grenades, 1);
     if (busted) {
-      this.player.ammo.smg.reserve = 0;
-      this.player.ammo.shotgun.reserve = 0;
-      this.player.ammo.rifle.reserve = 0;
+      p.ammo.smg.reserve = 0;
+      p.ammo.shotgun.reserve = 0;
+      p.ammo.rifle.reserve = 0;
     }
-    this.player.vehicle = null;
-    // Respawn repairs the car you arrived in, then parks it beside you.
+    p.vehicle = null;
+
     if (this.lastVehicle) {
       const v = this.lastVehicle;
       v.repair(true);
@@ -1150,77 +1302,147 @@ export class Game {
       v.driver = null;
       v.isPlayerVehicle = false;
       v.aiMode = 'parked';
-      const ridingIndex = this.traffic.vehicles.indexOf(v);
-      if (ridingIndex >= 0) this.traffic.vehicles.splice(ridingIndex, 1);
+      const riding = this.traffic.vehicles.indexOf(v);
+      if (riding >= 0) this.traffic.vehicles.splice(riding, 1);
       if (!this.traffic.parked.includes(v)) this.traffic.parked.push(v);
       this.ui.showToast('Your car was repaired and left outside.', 'success', 3);
       this.lastVehicle = null;
     }
+
     this.police.reset();
     this.bustedTriggered = false;
     this.wastedTriggered = false;
     this.camera.x = point.x;
     this.camera.y = point.y;
     this.camera.shake = 0;
-    this.ui.setDistrict(busted ? 'Vantage Heights' : 'Market Row', busted ? 'Costa Sol Police HQ' : 'Costa Sol General');
-    this.ui.showToast(busted ? `Released with a $${WANTED_CONFIG.bustedFine} fine.` : `Patched up. Hospital bill $${WANTED_CONFIG.wastedFee}.`, 'warning', 3.4);
+    this.ui.setDistrict(
+      busted ? 'Vantage Heights' : 'Market Row',
+      busted ? 'Costa Sol Police HQ' : 'Costa Sol General',
+    );
+    this.ui.showToast(
+      busted ? `Released with a $${WANTED_CONFIG.bustedFine} fine.` : `Patched up. Hospital bill $${WANTED_CONFIG.wastedFee}.`,
+      'warning',
+      3.4,
+    );
+
     if (this.pendingFail) {
-      const def = this.missions.defs[this.pendingFail.index];
-      this.missionFailed = { def, reason: this.pendingFail.reason };
-      this.missions.lastFailed = { index: this.pendingFail.index, step: this.missions.checkpointStep, reason: this.pendingFail.reason };
+      const failed = this.pendingFail;
+      const def = this.missions.defs[failed.index];
+      this.missionFailed = { def, reason: failed.reason };
+      this.missions.lastFailed = {
+        index: failed.index,
+        step: this.missions.checkpointStep,
+        reason: failed.reason,
+      };
       this.pendingFail = null;
-      this.state = 'missionFailed';
+      this.enterMode('missionFailed');
       this.audio.playMissionFail();
     } else {
-      this.state = 'playing';
+      this.enterMode('playing');
     }
-    this.stateTimer = 0;
     this.autosave();
   }
 
   // =================================================================
-  // Camera and district
+  // Photo mode
+  // =================================================================
+  enterPhoto() {
+    if (this.state !== 'playing') return;
+    this.photo = {
+      x: this.camera.x,
+      y: this.camera.y,
+      zoom: Math.max(1.2, this.camera.zoom),
+      photos: this.photoCount,
+      flash: 0,
+      cooldown: 0,
+    };
+    this.photo.x = clamp(this.photo.x, 120, WORLD_SIZE - 120);
+    this.photo.y = clamp(this.photo.y, 120, WORLD_SIZE - 120);
+    this.enterMode('photo');
+    this.ui.prompt = '';
+    this.prompt = '';
+  }
+
+  capturePhoto() {
+    this.photoCount += 1;
+    this.stats.photos = this.photoCount;
+    this.photo.photos = this.photoCount;
+    this.photo.flash = 1;
+    this.ui.photoFlash = 1;
+    this.audio.playPickup();
+    this.saveNotice = 0;
+  }
+
+  exitPhoto() {
+    this.state = 'playing';
+    this.stateTimer = 0;
+    this.camera.x = clamp(this.photo.x, 200, WORLD_SIZE - 200);
+    this.camera.y = clamp(this.photo.y, 200, WORLD_SIZE - 200);
+    this.camera.zoom = this.photo.zoom;
+    this.audio.setTireScreech(0);
+    if (this.player.isInVehicle && this.player.vehicle) {
+      this.audio.startEngine(this.player.vehicle.config.engineNote);
+    }
+    this.ui.showToast(`Photo mode closed · ${this.photoCount} shot${this.photoCount === 1 ? '' : 's'} in the roll.`, 'neutral', 2.4);
+  }
+
+  // =================================================================
+  // Camera, district
   // =================================================================
   updateCamera(dt) {
     const cam = this.camera;
-    let tx;
-    let ty;
-    let zoomTarget;
+    if (this.state === 'photo') {
+      const k = 1 - Math.exp(-dt * 10);
+      cam.x += (this.photo.x - cam.x) * k;
+      cam.y += (this.photo.y - cam.y) * k;
+      cam.zoom += (this.photo.zoom - cam.zoom) * (1 - Math.exp(-dt * 7));
+      cam.shake *= Math.exp(-dt * 8);
+      if (cam.shake < 0.004) cam.shake = 0;
+      return;
+    }
+
+    let targetX;
+    let targetY;
+    let targetZoom;
     if (this.state === 'title') {
       const t = this.titleDrift;
-      tx = this.titleAnchor.x + Math.sin(t) * 38;
-      ty = this.titleAnchor.y + Math.cos(t * 0.8) * 46;
-      zoomTarget = 1.92;
+      targetX = this.titleAnchor.x + Math.sin(t) * 40;
+      targetY = this.titleAnchor.y + Math.cos(t * 0.8) * 48;
+      targetZoom = 1.92;
     } else {
-      const focus = this.player.isInVehicle && this.player.vehicle ? this.player.vehicle : this.player;
-      const speed = this.player.isInVehicle && this.player.vehicle
-        ? Math.hypot(this.player.vehicle.vx, this.player.vehicle.vy)
-        : Math.hypot(this.player.vx, this.player.vy);
-      const lead = this.player.isInVehicle ? 0.26 : 0.08;
-      tx = focus.x + this.player.vx * lead;
-      ty = focus.y + this.player.vy * lead;
-      if (!this.player.isInVehicle) {
+      const inCar = this.player.isInVehicle && this.player.vehicle;
+      const focus = inCar ? this.player.vehicle : this.player;
+      const vx = inCar ? this.player.vehicle.vx : this.player.vx;
+      const vy = inCar ? this.player.vehicle.vy : this.player.vy;
+      const speed = Math.hypot(vx, vy);
+      const lead = inCar ? 0.27 : 0.09;
+      targetX = focus.x + vx * lead;
+      targetY = focus.y + vy * lead;
+
+      if (!inCar) {
         const mx = this.input.mouse.worldX - focus.x;
         const my = this.input.mouse.worldY - focus.y;
         const md = Math.hypot(mx, my);
-        if (md > 4) {
-          tx += (mx / md) * 28;
-          ty += (my / md) * 28;
+        if (md > 6) {
+          targetX += (mx / md) * 30;
+          targetY += (my / md) * 30;
         }
       }
-      const ratio = Math.min(1, speed / 520);
-      zoomTarget = 2.04 - ratio * 0.4;
-      if (['wasted', 'busted'].includes(this.state)) zoomTarget = 1.72;
+      const ratio = Math.min(1, speed / 540);
+      targetZoom = 2.05 - ratio * 0.42;
+      if (this.state === 'wasted' || this.state === 'busted') targetZoom = 1.72;
     }
-    const halfW = 1280 / 2 / zoomTarget;
-    const halfH = 720 / 2 / zoomTarget;
-    tx = CAM_CLAMP(tx, halfW, WORLD - halfW);
-    ty = CAM_CLAMP(ty, halfH, WORLD - halfH);
-    const k = 1 - Math.exp(-dt * 6.2);
-    cam.x += (tx - cam.x) * k;
-    cam.y += (ty - cam.y) * k;
-    cam.zoom += (zoomTarget - cam.zoom) * (1 - Math.exp(-dt * 3.2));
-    cam.shake *= Math.exp(-dt * 6.5);
+
+    const halfW = 1280 / 2 / targetZoom;
+    const halfH = 720 / 2 / targetZoom;
+    targetX = clamp(targetX, Math.min(halfW, WORLD_SIZE / 2), WORLD_SIZE - Math.min(halfW, WORLD_SIZE / 2));
+    targetY = clamp(targetY, Math.min(halfH, WORLD_SIZE / 2), WORLD_SIZE - Math.min(halfH, WORLD_SIZE / 2));
+
+    const follow = 1 - Math.exp(-dt * 6.0);
+    cam.x += (targetX - cam.x) * follow;
+    cam.y += (targetY - cam.y) * follow;
+    cam.zoom += (targetZoom - cam.zoom) * (1 - Math.exp(-dt * 3.1));
+    cam.shake *= Math.exp(-dt * 6.4);
     if (cam.shake < 0.005) cam.shake = 0;
   }
 
@@ -1241,50 +1463,40 @@ export class Game {
   }
 
   // =================================================================
-  // Prompts
-  // =================================================================
-  computePrompt() {
-    const p = this.player;
-    if (p.hotwire) return 'HOTWIRING...';
-    if (p.isInVehicle && p.vehicle) {
-      const garage = this.city.nearestGarage(p.x, p.y, GARAGE_CONFIG.radius);
-      if (garage && (p.vehicle.hp < p.vehicle.maxHp || p.vehicle.isBurning)) {
-        const cost = p.vehicle.hp < p.vehicle.maxHp * 0.4 || p.vehicle.isBurning ? GARAGE_CONFIG.fullRepairCost : GARAGE_CONFIG.repairCost;
-        return `REPAIR ${p.vehicle.config.name.toUpperCase()} - $${cost}`;
-      }
-      return `EXIT ${p.vehicle.config.name.toUpperCase()}`;
-    }
-    const marker = this.missions.availableMarker();
-    if (marker && Math.hypot(p.x - marker.x, p.y - marker.y) < marker.radius + 46) {
-      return `START JOB - ${marker.mission.title.toUpperCase()}`;
-    }
-    const v = this.traffic.findNearestVehicle(p.x, p.y, 80);
-    if (v) return v.occupiedByCivilian ? `CARJACK ${v.config.name.toUpperCase()}` : `STEAL ${v.config.name.toUpperCase()}`;
-    for (const ped of this.combat.pedestrians) {
-      if (!ped.isDead && !ped.robbed && Math.hypot(p.x - ped.x, p.y - ped.y) < 50) return 'ROB PEDESTRIAN';
-    }
-    const garage = this.city.nearestGarage(p.x, p.y, GARAGE_CONFIG.radius);
-    if (garage) return `GARAGE - ${garage.garage.name.toUpperCase()}`;
-    if (p.isReloading) return 'RELOADING...';
-    return '';
-  }
-
-  // =================================================================
-  // Menus
+  // Menu input
   // =================================================================
   consumePress(...codes) {
-    for (const c of codes) this.input.keysPressed.delete(c);
+    for (const code of codes) this.input.keysPressed.delete(code);
+  }
+
+  usableButtons() {
+    return this.ui.buttons.filter((button) => !button.disabled);
+  }
+
+  moveMenu(delta) {
+    const buttons = this.usableButtons();
+    if (!buttons.length) return;
+    this.ui.menuIndex = (this.ui.menuIndex + delta + buttons.length) % buttons.length;
+  }
+
+  invokeButton(action) {
+    if (!action) return;
+    if (this.state === 'title' || this.state === 'controls') this.handleMenuAction(action);
+    else if (this.state === 'paused') this.handlePauseAction(action);
+    else if (this.state === 'missionFailed') this.handleFailedAction(action);
+    else if (this.state === 'ending') this.handleEndingAction(action);
+    else if (this.state === 'missionComplete' && action === 'continue') this.continueAfterMission();
   }
 
   handleMenuInput() {
-    const buttons = this.ui.buttons.filter((b) => !b.disabled);
+    const buttons = this.usableButtons();
     if (!buttons.length) return;
     if (this.input.wasPressed('ArrowDown') || this.input.wasPressed('KeyS')) {
-      this.ui.menuIndex = (this.ui.menuIndex + 1) % buttons.length;
+      this.moveMenu(1);
       this.consumePress('ArrowDown', 'KeyS');
     }
     if (this.input.wasPressed('ArrowUp') || this.input.wasPressed('KeyW')) {
-      this.ui.menuIndex = (this.ui.menuIndex - 1 + buttons.length) % buttons.length;
+      this.moveMenu(-1);
       this.consumePress('ArrowUp', 'KeyW');
     }
     if (this.input.mouse.clicked) {
@@ -1312,10 +1524,10 @@ export class Game {
       if (!this.loadSave()) this.ui.showToast('No save yet - start a new game.', 'warning', 2.4);
     } else if (action === 'controls') {
       this.controlsReturn = 'title';
-      this.state = 'controls';
-      this.ui.menuIndex = 0;
+      this.enterMode('controls');
     } else if (action === 'back') {
       this.state = this.controlsReturn;
+      this.stateTimer = 0;
       this.ui.menuIndex = 0;
     }
   }
@@ -1324,6 +1536,7 @@ export class Game {
     if (this.input.pause || this.input.wasPressed('Enter') || this.input.wasPressed('Escape')) {
       this.consumePress('Escape', 'Enter');
       this.state = this.controlsReturn;
+      this.stateTimer = 0;
       this.ui.menuIndex = 0;
       return;
     }
@@ -1332,6 +1545,7 @@ export class Game {
       if (action) {
         this.input.mouse.clicked = false;
         this.state = this.controlsReturn;
+        this.stateTimer = 0;
         this.ui.menuIndex = 0;
       }
     }
@@ -1341,16 +1555,17 @@ export class Game {
     if (this.input.pause) {
       this.consumePress('Escape', 'KeyP');
       this.state = 'playing';
+      this.stateTimer = 0;
       return;
     }
-    const buttons = this.ui.buttons.filter((b) => !b.disabled);
+    const buttons = this.usableButtons();
     if (!buttons.length) return;
     if (this.input.wasPressed('ArrowDown') || this.input.wasPressed('KeyS')) {
-      this.ui.menuIndex = (this.ui.menuIndex + 1) % buttons.length;
+      this.moveMenu(1);
       this.consumePress('ArrowDown', 'KeyS');
     }
     if (this.input.wasPressed('ArrowUp') || this.input.wasPressed('KeyW')) {
-      this.ui.menuIndex = (this.ui.menuIndex - 1 + buttons.length) % buttons.length;
+      this.moveMenu(-1);
       this.consumePress('ArrowUp', 'KeyW');
     }
     if (this.input.mouse.clicked) {
@@ -1379,11 +1594,11 @@ export class Game {
       if (!this.loadSave()) this.ui.showToast('No save found.', 'warning', 2.2);
     } else if (action === 'controls') {
       this.controlsReturn = 'paused';
-      this.state = 'controls';
-      this.ui.menuIndex = 0;
+      this.enterMode('controls');
     } else if (action === 'title') {
       this.autosave();
       this.state = 'title';
+      this.stateTimer = 0;
       this.titleAnchor = { x: this.player.x, y: this.player.y };
       this.titleDrift = 0;
       this.ui.menuIndex = 0;
@@ -1396,8 +1611,7 @@ export class Game {
       const action = this.ui.hitButton(this.input.mouse.x, this.input.mouse.y);
       if (action) {
         this.input.mouse.clicked = false;
-        if (action === 'retry') this.missions.retry();
-        else if (action === 'abandon') this.missions.abandon();
+        this.handleFailedAction(action);
         return;
       }
     }
@@ -1412,22 +1626,33 @@ export class Game {
     }
   }
 
-  handleEndingInput() {
+  handleFailedAction(action) {
+    if (action === 'retry') this.missions.retry();
+    else if (action === 'abandon') this.missions.abandon();
+  }
+
+  handleEndingInput(dt) {
     if (this.input.mouse.clicked) {
       const action = this.ui.hitButton(this.input.mouse.x, this.input.mouse.y);
       if (action === 'title') {
         this.input.mouse.clicked = false;
-        this.state = 'title';
-        this.titleAnchor = { x: this.player.x, y: this.player.y };
-        this.ui.menuIndex = 0;
+        this.handleEndingAction('title');
       }
     }
     if (this.input.wasPressed('Enter') || this.input.wasPressed('Space') || this.input.wasPressed('Escape')) {
       this.consumePress('Enter', 'Space', 'Escape');
-      this.state = 'title';
-      this.titleAnchor = { x: this.player.x, y: this.player.y };
-      this.ui.menuIndex = 0;
+      this.handleEndingAction('title');
     }
+    void dt;
+  }
+
+  handleEndingAction(action) {
+    if (action !== 'title') return;
+    this.state = 'title';
+    this.stateTimer = 0;
+    this.titleAnchor = { x: this.player.x, y: this.player.y };
+    this.titleDrift = 0;
+    this.ui.menuIndex = 0;
   }
 
   // =================================================================
@@ -1435,15 +1660,14 @@ export class Game {
   // =================================================================
   render() {
     this.renderer.render(this);
-    const hudStates = ['playing', 'dialogue', 'paused', 'missionComplete', 'missionFailed', 'wasted', 'busted'];
-    if (hudStates.includes(this.state)) {
+    if (HUD_MODES.has(this.state)) {
       this.ui.drawHUD(this.ctx, this);
       if ((this.state === 'playing' || this.state === 'dialogue') && this.player.hitFlash > 0.03) {
         const ctx = this.ctx;
-        const grad = ctx.createRadialGradient(640, 360, 240, 640, 360, 780);
-        grad.addColorStop(0, 'rgba(160, 20, 30, 0)');
-        grad.addColorStop(1, `rgba(160, 20, 30, ${this.player.hitFlash * 0.32})`);
-        ctx.fillStyle = grad;
+        const flash = ctx.createRadialGradient(640, 360, 220, 640, 360, 780);
+        flash.addColorStop(0, 'rgba(160, 20, 30, 0)');
+        flash.addColorStop(1, `rgba(160, 20, 30, ${this.player.hitFlash * 0.34})`);
+        ctx.fillStyle = flash;
         ctx.fillRect(0, 0, 1280, 720);
       }
     }
@@ -1451,7 +1675,7 @@ export class Game {
   }
 
   // =================================================================
-  // Debug and screenshots
+  // Debug handles
   // =================================================================
   setWanted(n) {
     this.police.setWanted(n);
@@ -1464,6 +1688,7 @@ export class Game {
     if (!started) return false;
     this.ui.dialog = null;
     this.state = 'playing';
+    this.stateTimer = 0;
     return true;
   }
 
@@ -1484,6 +1709,7 @@ export class Game {
     car.driver = this.player;
     car.isPlayerVehicle = true;
     car.occupiedByCivilian = false;
+    car.isMission = false;
     if (speed) {
       car.vx = Math.cos(angle) * speed;
       car.vy = Math.sin(angle) * speed;
@@ -1509,6 +1735,7 @@ export class Game {
       get combat() { return game.combat; },
       get game() { return game; },
       get collectibles() { return game.collectibles; },
+      get photo() { return game.photo; },
       setWanted: (n) => game.setWanted(n),
       startMission: (i, s = 0) => game.startMission(i, s),
       get state() { return game.state; },
@@ -1524,7 +1751,13 @@ export class Game {
       clock: this.clockLabel(),
       weather: this.weather.type,
       wetness: Number(this.weather.wetness.toFixed(2)),
-      player: { x: Math.round(this.player.x), y: Math.round(this.player.y), health: this.player.health, money: this.player.money, grenades: this.player.grenades },
+      player: {
+        x: Math.round(this.player.x),
+        y: Math.round(this.player.y),
+        health: this.player.health,
+        money: this.player.money,
+        grenades: this.player.grenades,
+      },
       wanted: this.police.wantedStars,
       mission: this.missions.active ? this.missions.currentIndex : null,
       traffic: this.traffic.vehicles.length,
@@ -1532,6 +1765,7 @@ export class Game {
       enemies: this.combat.enemies.length,
       collectibles: `${this.collectibles.foundCount}/${this.collectibles.total}`,
       stunts: this.stuntsCount,
+      photos: this.photoCount,
     };
   }
 

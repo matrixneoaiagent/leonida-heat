@@ -51,6 +51,7 @@ export class SoundEngine {
     this.windLevel = 0.2;
     this.lastSirenStar = 1;
     this.lastGunAt = 0;
+    this.externalMusic = false;
   }
 
   stations() {
@@ -549,6 +550,7 @@ export class SoundEngine {
   }
 
   scheduleRadio() {
+    if (this.externalMusic) return;
     if (!this.ctx || !this.initialized || this.muted || this.currentStation.id === 'off') return;
     if (this.ctx.state !== 'running') return;
     const station = this.currentStation;

@@ -99,7 +99,7 @@ export function roundRect(ctx, x, y, w, h, r) {
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: false });
+    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     this.width = canvas.width || 1280;
     this.height = canvas.height || 720;
     this.view = { x: 0, y: 0, w: 0, h: 0, x2: 0, y2: 0 };
@@ -112,6 +112,314 @@ export class Renderer {
     this._rain = this.buildRainField();
     this._stars = this.buildStars();
     this._tileCount = WORLD / TILE;
+    this._glowCache = new Map();
+    this._screenCache = new Map();
+    this._linearCache = new Map();
+    this._layerCity = null;
+    this._wetLayer = null;
+    this._reflectionLayer = null;
+    this._lightLayer = null;
+    this._shadowLayer = null;
+    this._shadowKey = '';
+    this._flameTypes = new Set(['spark', 'hit', 'muzzle', 'explosion_fire', 'shockwave', 'rain', 'splash']);
+    this._vehicleCacheFrame = -1;
+    this._vehicleCache = [];
+    this._peopleCacheFrame = -1;
+    this._peopleCache = [];
+    this._actorCacheFrame = -1;
+    this._actorCache = [];
+    this._bodyGradients = new Map();
+    this._litColorCache = new Map();
+    this._gradientKey = 0;
+  }
+
+  // =================================================================
+  // Cached sprites and static world layers
+  // =================================================================
+  radialSprite(key, radius, stops) {
+    const cacheKey = `${key}:${Math.round(radius)}`;
+    const cached = this._glowCache.get(cacheKey);
+    if (cached) return cached;
+    const size = Math.max(4, Math.ceil(radius * 2));
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const g = canvas.getContext('2d');
+    const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    for (const [offset, color] of stops) grad.addColorStop(offset, color);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+    this._glowCache.set(cacheKey, canvas);
+    return canvas;
+  }
+
+  drawGlow(ctx, sprite, x, y, radius, alpha = 1) {
+    if (!sprite || alpha <= 0.002) return;
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(sprite, x - radius, y - radius, radius * 2, radius * 2);
+  }
+
+  linearSprite(key, width, height, stops, vertical = false) {
+    const cacheKey = `${key}:${width}x${height}:${vertical ? 'v' : 'h'}`;
+    const cached = this._linearCache.get(cacheKey);
+    if (cached) return cached;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const g = canvas.getContext('2d');
+    const grad = vertical ? g.createLinearGradient(0, 0, 0, height) : g.createLinearGradient(0, 0, width, 0);
+    for (const [offset, color] of stops) grad.addColorStop(offset, color);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, width, height);
+    this._linearCache.set(cacheKey, canvas);
+    return canvas;
+  }
+
+  screenSprite(key, builder) {
+    const cached = this._screenCache.get(key);
+    if (cached) return cached;
+    const canvas = document.createElement('canvas');
+    canvas.width = this.width;
+    canvas.height = this.height;
+    const g = canvas.getContext('2d');
+    builder(g, this.width, this.height);
+    this._screenCache.set(key, canvas);
+    return canvas;
+  }
+
+  ensureWorldLayers(game) {
+    if (this._layerCity === game.city) return;
+    this._layerCity = game.city;
+    this._wetLayer = this.bakeWetLayer(game);
+    this._reflectionLayer = null;
+    this._lightLayer = this.bakeLightLayer(game);
+    this._shadowLayer = null;
+    this._shadowKey = '';
+  }
+
+  layerCanvas() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1024;
+    canvas.height = 1024;
+    const g = canvas.getContext('2d');
+    g.scale(0.32, 0.32);
+    return { canvas, g };
+  }
+
+  drawWorldLayer(ctx, canvas, alpha = 1) {
+    if (!canvas || alpha <= 0.002) return;
+    const v = this.view;
+    const x0 = Math.max(0, v.x - 2);
+    const y0 = Math.max(0, v.y - 2);
+    const x1 = Math.min(WORLD, v.x2 + 2);
+    const y1 = Math.min(WORLD, v.y2 + 2);
+    if (x1 <= x0 || y1 <= y0) return;
+    const scale = canvas.width / WORLD;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(
+      canvas,
+      x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale,
+      x0, y0, x1 - x0, y1 - y0,
+    );
+    ctx.restore();
+  }
+
+  bakeWetLayer(game) {
+    const { canvas, g } = this.layerCanvas();
+    for (const puddle of game.city.puddles) {
+      g.save();
+      g.translate(puddle.x, puddle.y);
+      g.rotate(puddle.angle || 0);
+      g.fillStyle = `rgba(22, 39, 52, ${puddle.alpha})`;
+      g.beginPath();
+      g.ellipse(0, 0, puddle.rx, puddle.ry, 0, 0, TAU);
+      g.fill();
+      g.strokeStyle = `rgba(200, 236, 240, ${puddle.alpha * 0.5})`;
+      g.lineWidth = 1;
+      g.beginPath();
+      g.ellipse(-1, -1, puddle.rx * 0.74, puddle.ry * 0.68, 0, 0.2, Math.PI * 1.5);
+      g.stroke();
+      g.restore();
+    }
+    this.bakeReflectionContent(g, game);
+    return canvas;
+  }
+
+  bakeReflectionContent(g, game) {
+    g.globalCompositeOperation = 'lighter';
+    for (const lamp of game.city.streetlights) {
+      const h = 38 + lamp.radius * 0.45;
+      const grad = g.createLinearGradient(lamp.x, lamp.y, lamp.x, lamp.y + h);
+      grad.addColorStop(0, 'rgba(255, 226, 168, 0.23)');
+      grad.addColorStop(0.55, 'rgba(255, 214, 140, 0.10)');
+      grad.addColorStop(1, 'rgba(255, 196, 110, 0)');
+      g.fillStyle = grad;
+      g.beginPath();
+      g.ellipse(lamp.x, lamp.y + h * 0.5, 4 + h * 0.08, h * 0.5, 0, 0, TAU);
+      g.fill();
+    }
+    for (const b of game.city.buildings) {
+      if (!b.neonText) continue;
+      const baseY = b.y + b.h * 0.46;
+      const color = b.neonColor || '#ff7fa5';
+      const grad = g.createLinearGradient(b.x, baseY, b.x, baseY + 56);
+      grad.addColorStop(0, alpha(color, 0.20));
+      grad.addColorStop(0.6, alpha(color, 0.09));
+      grad.addColorStop(1, alpha(color, 0));
+      g.fillStyle = grad;
+      g.fillRect(b.x - 17, baseY, 34, 56);
+    }
+    for (const billboard of game.city.billboards) {
+      const grad = g.createRadialGradient(billboard.x, billboard.y + 18, 2, billboard.x, billboard.y + 24, 76);
+      grad.addColorStop(0, alpha(billboard.color, 0.16));
+      grad.addColorStop(0.55, alpha(billboard.color, 0.055));
+      grad.addColorStop(1, alpha(billboard.color, 0));
+      g.fillStyle = grad;
+      g.beginPath();
+      g.ellipse(billboard.x, billboard.y + 24, 76, 34, 0, 0, TAU);
+      g.fill();
+    }
+    g.globalCompositeOperation = 'source-over';
+  }
+
+  bakeReflectionLayer(game) {
+    const { canvas, g } = this.layerCanvas();
+    this.bakeReflectionContent(g, game);
+    return canvas;
+  }
+
+  bakeLightLayer(game) {
+    const { canvas, g } = this.layerCanvas();
+    g.globalCompositeOperation = 'lighter';
+    for (const light of game.city.streetlights) {
+      const r = light.radius;
+      const grad = g.createRadialGradient(light.x, light.y, 1, light.x, light.y, r);
+      grad.addColorStop(0, 'rgba(255, 232, 184, 0.30)');
+      grad.addColorStop(0.26, 'rgba(255, 219, 158, 0.16)');
+      grad.addColorStop(0.6, 'rgba(255, 202, 136, 0.055)');
+      grad.addColorStop(1, 'rgba(255, 186, 112, 0)');
+      g.fillStyle = grad;
+      g.beginPath();
+      g.arc(light.x, light.y, r, 0, TAU);
+      g.fill();
+      g.fillStyle = 'rgba(255, 250, 224, 0.85)';
+      g.beginPath();
+      g.arc(light.x, light.y - 10, 3.8, 0, TAU);
+      g.fill();
+    }
+    for (const b of game.city.buildings) {
+      const district = districtAt(b.x, b.y);
+      if (b.neonText) {
+        const color = b.neonColor || '#ff7fa5';
+        const signY = b.y - b.h / 2 + b.h - 14;
+        const halo = g.createRadialGradient(b.x, signY, 1, b.x, signY, 28);
+        halo.addColorStop(0, alpha(color, 0.44));
+        halo.addColorStop(0.42, alpha(color, 0.16));
+        halo.addColorStop(0.8, alpha(color, 0.03));
+        halo.addColorStop(1, alpha(color, 0));
+        g.fillStyle = halo;
+        g.fillRect(b.x - 30, signY - 30, 60, 60);
+        const width = Math.min(b.w - 8, Math.max(34, b.neonText.length * 5.2));
+        g.fillStyle = alpha(color, 0.46);
+        g.fillRect(b.x - width / 2, signY + 1, width, 2.4);
+      }
+      const left = b.x - b.w / 2;
+      const top = b.y - b.h / 2;
+      const rows = Math.min(4, b.windowRows || 2);
+      const cols = Math.min(6, b.windowCols || 3);
+      for (let r = 0; r < rows; r += 1) {
+        for (let i = 0; i < cols; i += 1) {
+          if (game.city.hash(b.x + i * 13, b.y + r * 29, 4) <= 0.45) continue;
+          g.fillStyle = 'rgba(255, 214, 146, 0.28)';
+          g.fillRect(left + 8 + i * ((b.w - 16) / cols), top + b.h - 5, 4.2, 2.2);
+          g.fillStyle = 'rgba(255, 220, 160, 0.16)';
+          g.fillRect(left + b.w - 5, top + 9 + r * ((b.h - 18) / rows), 2.2, 4.2);
+        }
+      }
+      if (b.height > 38) {
+        const rim = district?.neon || '#6fe0e6';
+        g.strokeStyle = alpha(rim, 0.24);
+        g.lineWidth = 1.5;
+        g.strokeRect(left + 2, top + 2, b.w - 4, b.h - 4);
+        g.fillStyle = alpha(rim, 0.5);
+        for (const [cx, cy] of [[left + 4, top + 4], [left + b.w - 4, top + 4], [left + 4, top + b.h - 4], [left + b.w - 4, top + b.h - 4]]) {
+          g.fillRect(cx - 1.5, cy - 1.5, 3, 3);
+        }
+      }
+    }
+    for (const bb of game.city.billboards) {
+      const halo = g.createRadialGradient(bb.x, bb.y - 7, 2, bb.x, bb.y - 7, 48);
+      halo.addColorStop(0, alpha(bb.color, 0.26));
+      halo.addColorStop(0.52, alpha(bb.color, 0.08));
+      halo.addColorStop(1, alpha(bb.color, 0));
+      g.fillStyle = halo;
+      g.fillRect(bb.x - 48, bb.y - 55, 96, 96);
+      g.save();
+      g.translate(bb.x, bb.y);
+      g.rotate(bb.angle || 0);
+      g.fillStyle = 'rgba(12, 10, 16, 0.86)';
+      g.fillRect(-31, -18, 62, 22);
+      g.strokeStyle = alpha(bb.color, 0.9);
+      g.lineWidth = 1.4;
+      g.strokeRect(-31, -18, 62, 22);
+      g.fillStyle = bb.color;
+      g.font = '900 9px "Segoe UI", Arial, sans-serif';
+      g.textAlign = 'center';
+      g.fillText(bb.text, 0, -4);
+      g.restore();
+    }
+    return canvas;
+  }
+
+  ensureShadowLayer(game) {
+    const light = this.light;
+    const key = `${Math.round(light.shadowDir * 32)}:${Math.round(light.shadowLength * 8)}`;
+    if (this._shadowLayer && this._shadowKey === key) return this._shadowLayer;
+    const { canvas, g } = this.layerCanvas();
+    const length = 18 + light.shadowLength * 34;
+    const dx = Math.cos(light.shadowDir) * length;
+    const dy = Math.sin(light.shadowDir) * length;
+    g.fillStyle = 'rgba(18, 22, 28, 1)';
+    for (const b of game.city.buildings) {
+      pathRound(g, -b.w / 2 + dx + b.x, -b.h / 2 + dy + b.y, b.w, b.h, 3);
+      g.fill();
+    }
+    g.strokeStyle = 'rgba(22, 28, 24, 1)';
+    for (const p of game.city.palmTrees) {
+      g.lineWidth = Math.max(2, p.size * 0.18);
+      g.beginPath();
+      g.moveTo(p.x, p.y);
+      g.lineTo(p.x + dx * 0.75, p.y + dy * 0.75);
+      g.stroke();
+    }
+    this._shadowLayer = canvas;
+    this._shadowKey = key;
+    return canvas;
+  }
+
+  headlightSprite() {
+    if (this._headlightSprite) return this._headlightSprite;
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 64;
+    const g = canvas.getContext('2d');
+    const grad = g.createLinearGradient(0, 0, 128, 0);
+    grad.addColorStop(0, 'rgba(255, 242, 210, 0.16)');
+    grad.addColorStop(0.22, 'rgba(255, 235, 194, 0.10)');
+    grad.addColorStop(0.62, 'rgba(255, 225, 176, 0.035)');
+    grad.addColorStop(1, 'rgba(255, 216, 160, 0)');
+    g.fillStyle = grad;
+    g.beginPath();
+    g.moveTo(0, 26);
+    g.lineTo(128, 0);
+    g.lineTo(128, 64);
+    g.lineTo(0, 38);
+    g.closePath();
+    g.fill();
+    this._headlightSprite = canvas;
+    return canvas;
   }
 
   // =================================================================
@@ -142,14 +450,17 @@ export class Renderer {
 
     const halfW = this.width / 2 / cam.zoom;
     const halfH = this.height / 2 / cam.zoom;
-    this.view = {
-      x: cam.x - halfW, y: cam.y - halfH, w: halfW * 2, h: halfH * 2,
-      x2: cam.x + halfW, y2: cam.y + halfH,
-    };
+    const view = this.view;
+    view.x = cam.x - halfW;
+    view.y = cam.y - halfH;
+    view.w = halfW * 2;
+    view.h = halfH * 2;
+    view.x2 = cam.x + halfW;
+    view.y2 = cam.y + halfH;
 
+    this.ensureWorldLayers(game);
     this.paintTerrain(game);
     this.paintOcean(game);
-    this.paintBuildingShadows(game);
     this.paintStreetWear(game);
     this.paintAmbientWash(game);
     this.paintMirrors(game);
@@ -157,9 +468,6 @@ export class Renderer {
     this.paintSirenHalos(game);
     this.paintHeadlightWashes(game);
     this.paintSearchSweep(game);
-    this.paintBuildingHalos(game);
-    this.paintNeonSigns(game);
-    this.paintCityLife(game);
     this.paintTrafficSignals(game);
     this.paintPalms(game);
     this.paintContactShadows(game);
@@ -212,9 +520,11 @@ export class Renderer {
     else if (raw < 0.80) sky = blend(sunset, evening, smoothstep(0.70, 0.80, raw));
     else sky = blend(evening, midnight, smoothstep(0.80, 0.96, raw));
 
-    // Ground ambient keeps a little of the district colour at noon.
+    // Ground ambient keeps a little of the district colour at noon. The night
+    // floor is lifted enough that kerbs, crosswalks and car paint stay legible
+    // under the blue grade without killing the mood.
     const dayGround = rgb('#6f8068');
-    const nightGround = rgb('#151a2a');
+    const nightGround = rgb('#1d2438');
     const ambient = blend(nightGround, dayGround, day);
     const base = blend(sky, ambient, 0.24);
     const sun = blend(rgb('#9db8ff'), blend(rgb('#ffe2b4'), rgb('#ff9d6e'), golden), day);
@@ -252,7 +562,7 @@ export class Renderer {
     const canvas = document.createElement('canvas');
     canvas.width = TILE;
     canvas.height = TILE;
-    const tctx = canvas.getContext('2d', { alpha: false });
+    const tctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const x0 = tx * TILE;
     const y0 = ty * TILE;
     tctx.save();
@@ -268,6 +578,7 @@ export class Renderer {
     this.bakeStructures(tctx, game, box);
     this.bakeFurniture(tctx, game, box);
     this.bakeRamps(tctx, game, box);
+    this.bakeBuildingShadows(tctx, game, box);
     tctx.restore();
 
     tile = { canvas, x: x0, y: y0 };
@@ -281,12 +592,21 @@ export class Renderer {
     const maxTy = Math.min(this._tileCount - 1, Math.floor(v.y2 / TILE));
     const minTx = Math.max(0, Math.floor(v.x / TILE));
     const minTy = Math.max(0, Math.floor(v.y / TILE));
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
     for (let ty = minTy; ty <= maxTy; ty += 1) {
       for (let tx = minTx; tx <= maxTx; tx += 1) {
         const tile = this.tileAt(game, tx, ty);
-        this.ctx.drawImage(tile.canvas, tile.x, tile.y);
+        const sx = Math.max(0, v.x - tile.x);
+        const sy = Math.max(0, v.y - tile.y);
+        const sw = Math.min(TILE - sx, v.x2 - tile.x - sx);
+        const sh = Math.min(TILE - sy, v.y2 - tile.y - sy);
+        if (sw <= 0 || sh <= 0) continue;
+        ctx.drawImage(tile.canvas, sx, sy, sw, sh, tile.x + sx, tile.y + sy, sw, sh);
       }
     }
+    ctx.restore();
   }
 
   bakeGround(ctx, game, box) {
@@ -1214,8 +1534,35 @@ export class Renderer {
     ctx.restore();
   }
 
-  bakeRamps(ctx, game, box) {
-    for (const ramp of game.city.ramps) {
+  // Building and palm shadows are baked into the opaque terrain tiles. They
+  // are static for the life of a city build, which removes a full-screen alpha
+  // pass from every frame.
+  bakeBuildingShadows(ctx, game, box) {
+    const light = this.light;
+    if (!light || light.day < 0.06) return;
+    const length = 18 + light.shadowLength * 34;
+    const dx = Math.cos(light.shadowDir) * length;
+    const dy = Math.sin(light.shadowDir) * length;
+    ctx.save();
+    ctx.fillStyle = `rgba(18, 22, 28, ${0.10 + light.day * 0.11})`;
+    for (const b of game.city.buildings) {
+      if (!this.inViewBox(box, b.x, b.y, 100)) continue;
+      pathRound(ctx, -b.w / 2 + dx + b.x, -b.h / 2 + dy + b.y, b.w, b.h, 3);
+      ctx.fill();
+    }
+    ctx.strokeStyle = `rgba(22, 28, 24, ${0.08 + light.day * 0.09})`;
+    for (const p of game.city.palmTrees) {
+      if (!this.inViewBox(box, p.x, p.y, 60)) continue;
+      ctx.lineWidth = Math.max(2, p.size * 0.18);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x + dx * 0.75, p.y + dy * 0.75);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  bakeRamps(ctx, game, box) {    for (const ramp of game.city.ramps) {
       if (!this.inViewBox(box, ramp.x, ramp.y, 60)) continue;
       ctx.save();
       ctx.translate(ramp.x, ramp.y);
@@ -1379,36 +1726,10 @@ export class Renderer {
   // Shadows and street detail
   // =================================================================
   paintBuildingShadows(game) {
-    const ctx = this.ctx;
     const light = this.light;
     if (light.day < 0.06) return;
-    const length = 18 + light.shadowLength * 34;
-    const dx = Math.cos(light.shadowDir) * length;
-    const dy = Math.sin(light.shadowDir) * length;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, 2712, WORLD);
-    ctx.clip();
-    ctx.fillStyle = `rgba(18, 22, 28, ${0.10 + light.day * 0.11})`;
-    for (const b of game.city.buildings) {
-      if (!this.inView(b.x, b.y, 100)) continue;
-      ctx.save();
-      ctx.translate(b.x, b.y);
-      ctx.transform(1, 0, 0, 1, 0, 0);
-      pathRound(ctx, -b.w / 2 + dx, -b.h / 2 + dy, b.w, b.h, 3);
-      ctx.fill();
-      ctx.restore();
-    }
-    for (const p of game.city.palmTrees) {
-      if (!this.inView(p.x, p.y, 60)) continue;
-      ctx.strokeStyle = `rgba(22, 28, 24, ${0.08 + light.day * 0.09})`;
-      ctx.lineWidth = Math.max(2, p.size * 0.18);
-      ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
-      ctx.lineTo(p.x + dx * 0.75, p.y + dy * 0.75);
-      ctx.stroke();
-    }
-    ctx.restore();
+    const layer = this.ensureShadowLayer(game);
+    this.drawWorldLayer(this.ctx, layer, 0.085 + light.day * 0.12);
   }
 
   paintStreetWear(game) {
@@ -1426,25 +1747,9 @@ export class Renderer {
       ctx.restore();
     }
 
-    // Puddles and their damp rings.
+    // Static puddles are pre-rendered into a world-space layer.
     const wet = game.weather?.wetness || 0;
-    for (const puddle of city.puddles) {
-      if (!this.inView(puddle.x, puddle.y, 70)) continue;
-      const growth = 0.7 + wet * 0.55;
-      ctx.save();
-      ctx.translate(puddle.x, puddle.y);
-      ctx.rotate(puddle.angle);
-      ctx.fillStyle = `rgba(22, 39, 52, ${puddle.alpha * (0.5 + wet * 0.9)})`;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, puddle.rx * growth, puddle.ry * growth, 0, 0, TAU);
-      ctx.fill();
-      ctx.strokeStyle = `rgba(200, 236, 240, ${puddle.alpha * wet * 0.9})`;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.ellipse(-1, -1, puddle.rx * growth * 0.74, puddle.ry * growth * 0.68, 0, 0.2, Math.PI * 1.5);
-      ctx.stroke();
-      ctx.restore();
-    }
+    if (wet > 0.04) this.drawWorldLayer(ctx, this._wetLayer, 0.42 + wet * 0.58);
 
     // Scuffs and shell casings.
     for (const scuff of game.particles.scuffs) {
@@ -1476,29 +1781,21 @@ export class Renderer {
       // the baked colour survives and the result reads as night, not fog.
       ctx.save();
       ctx.globalCompositeOperation = 'multiply';
-      const r = Math.round(mix(255, 86, light.dark));
-      const g = Math.round(mix(255, 98, light.dark));
-      const b = Math.round(mix(255, 142, light.dark));
+      const r = Math.round(mix(255, 104, light.dark));
+      const g = Math.round(mix(255, 118, light.dark));
+      const b = Math.round(mix(255, 164, light.dark));
       ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
       ctx.fillRect(v.x - 4, v.y - 4, v.w + 8, v.h + 8);
       ctx.restore();
     }
-    if (light.golden > 0.2) {
-      const g = ctx.createLinearGradient(v.x, v.y2, v.x2, v.y);
-      g.addColorStop(0, `rgba(255, 126, 82, ${0.24 * light.golden})`);
-      g.addColorStop(0.55, `rgba(205, 92, 128, ${0.12 * light.golden})`);
-      g.addColorStop(1, `rgba(60, 48, 96, 0)`);
-      ctx.fillStyle = g;
-      ctx.fillRect(v.x - 4, v.y - 4, v.w + 8, v.h + 8);
-    }
     // A faint sea mist cools the water side.
     if (v.x2 > 2660 && game.weather?.wetness < 0.8) {
-      const mist = ctx.createLinearGradient(2660, 0, 2920, 0);
-      mist.addColorStop(0, 'rgba(170, 220, 220, 0)');
-      mist.addColorStop(0.5, `rgba(170, 220, 220, ${0.05 + light.dark * 0.05})`);
-      mist.addColorStop(1, 'rgba(170, 220, 220, 0)');
-      ctx.fillStyle = mist;
-      ctx.fillRect(2660, v.y, 270, v.h);
+      const mist = this.linearSprite('sea-mist', 128, 4, [
+        [0, 'rgba(170, 220, 220, 0)'],
+        [0.5, `rgba(170, 220, 220, ${0.05 + light.dark * 0.05})`],
+        [1, 'rgba(170, 220, 220, 0)'],
+      ]);
+      ctx.drawImage(mist, 2660, v.y, 270, v.h);
     }
   }
 
@@ -1507,12 +1804,29 @@ export class Renderer {
   litColor(hex, strength = 0.62) {
     const dark = this.light?.dark || 0;
     if (dark < 0.05) return hex;
+    const key = `${hex}:${strength}:${Math.round(dark * 60)}`;
+    const cached = this._litColorCache.get(key);
+    if (cached) return cached;
     const c = rgb(hex);
     const target = [19, 27, 45];
     const r = Math.round(mix(c[0], target[0], dark * strength));
     const g = Math.round(mix(c[1], target[1], dark * strength));
     const b = Math.round(mix(c[2], target[2], dark * strength));
-    return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+    const out = `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+    if (this._litColorCache.size < 512) this._litColorCache.set(key, out);
+    return out;
+  }
+
+  bodyGradient(ctx, color, width) {
+    const key = `${color}:${Math.round(width)}`;
+    const cached = this._bodyGradients.get(key);
+    if (cached) return cached;
+    const g = ctx.createLinearGradient(0, -width / 2, 0, width / 2);
+    g.addColorStop(0, shade(color, 0.22));
+    g.addColorStop(0.35, color);
+    g.addColorStop(1, shade(color, -0.28));
+    if (this._bodyGradients.size < 240) this._bodyGradients.set(key, g);
+    return g;
   }
 
   paintMirrors(game) {    const wet = clamp(game.weather?.wetness || 0, 0, 1);
@@ -1523,56 +1837,19 @@ export class Renderer {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
 
-    // Long vertical streaks from street lamps.
-    for (const lamp of game.city.streetlights) {
-      if (!this.inView(lamp.x, lamp.y, lamp.radius + 90)) continue;
-      const h = 38 + lamp.radius * 0.45;
-      const g = ctx.createLinearGradient(lamp.x, lamp.y, lamp.x, lamp.y + h);
-      g.addColorStop(0, `rgba(255, 226, 168, ${0.23 * wet})`);
-      g.addColorStop(0.55, `rgba(255, 214, 140, ${0.10 * wet})`);
-      g.addColorStop(1, 'rgba(255, 196, 110, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.ellipse(lamp.x, lamp.y + h * 0.5, 4 + h * 0.08, h * 0.5, 0, 0, TAU);
-      ctx.fill();
-    }
-
-    // Neon smears on the wet pavement.
-    for (const b of game.city.buildings) {
-      if (!b.neonText || !this.inView(b.x, b.y, 100)) continue;
-      const baseY = b.y + b.h * 0.46;
-      const g = ctx.createLinearGradient(b.x, baseY, b.x, baseY + 56);
-      g.addColorStop(0, alpha(b.neonColor || '#ff7fa5', 0.20 * wet));
-      g.addColorStop(0.6, alpha(b.neonColor || '#ff7fa5', 0.09 * wet));
-      g.addColorStop(1, alpha(b.neonColor || '#ff7fa5', 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(b.x - 17, baseY, 34, 56);
-    }
-
     // Police siren colour spilling down the asphalt.
     for (const cop of game.police?.cops || []) {
       if (!cop.sirenActive || !this.inView(cop.x, cop.y, 120)) continue;
-      const hue = cop.sirenPhase ? '255, 78, 96' : '92, 166, 255';
-      const g = ctx.createRadialGradient(cop.x, cop.y + 24, 2, cop.x, cop.y + 38, 64);
-      g.addColorStop(0, `rgba(${hue}, ${0.19 * wet})`);
-      g.addColorStop(1, `rgba(${hue}, 0)`);
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.ellipse(cop.x, cop.y + 26, 46, 20, cop.angle, 0, TAU);
-      ctx.fill();
-    }
-
-    // Neon signs spill a wide colour pool onto the wet asphalt.
-    for (const billboard of game.city.billboards) {
-      if (!this.inView(billboard.x, billboard.y, 120)) continue;
-      const g = ctx.createRadialGradient(billboard.x, billboard.y + 18, 2, billboard.x, billboard.y + 24, 76);
-      g.addColorStop(0, alpha(billboard.color, 0.16 * wet));
-      g.addColorStop(0.55, alpha(billboard.color, 0.055 * wet));
-      g.addColorStop(1, alpha(billboard.color, 0));
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.ellipse(billboard.x, billboard.y + 24, 76, 34, 0, 0, TAU);
-      ctx.fill();
+      const red = cop.sirenPhase;
+      const sprite = red
+        ? this.radialSprite('siren-red', 64, [[0, 'rgba(255, 78, 96, 0.19)'], [1, 'rgba(255, 78, 96, 0)']])
+        : this.radialSprite('siren-blue', 64, [[0, 'rgba(92, 166, 255, 0.19)'], [1, 'rgba(92, 166, 255, 0)']]);
+      ctx.save();
+      ctx.translate(cop.x, cop.y + 26);
+      ctx.rotate(cop.angle);
+      ctx.scale(0.72, 0.31);
+      this.drawGlow(ctx, sprite, 0, 0, 64, wet);
+      ctx.restore();
     }
 
     // Moving lights streak along the wet tarmac.
@@ -1592,10 +1869,7 @@ export class Renderer {
       for (const side of [-1, 1]) {
         const tx = tailX + rx * v.width * 0.3 * side;
         const ty = tailY + ry * v.width * 0.3 * side;
-        const g = ctx.createLinearGradient(tx, ty, tx - fx * 58, ty - fy * 58);
-        g.addColorStop(0, 'rgba(255, 70, 80, 0.24)');
-        g.addColorStop(1, 'rgba(255, 40, 70, 0)');
-        ctx.strokeStyle = g;
+        ctx.strokeStyle = 'rgba(255, 70, 80, 0.22)';
         ctx.lineWidth = 3.2;
         ctx.beginPath();
         ctx.moveTo(tx, ty);
@@ -1604,38 +1878,13 @@ export class Renderer {
       }
       const hx = noseX;
       const hy = noseY;
-      const hg = ctx.createLinearGradient(hx, hy, hx + fx * 46, hy + fy * 46);
-      hg.addColorStop(0, 'rgba(255, 236, 186, 0.20)');
-      hg.addColorStop(1, 'rgba(255, 220, 160, 0)');
-      ctx.strokeStyle = hg;
-      ctx.lineWidth = 5;
-      ctx.beginPath();
-      ctx.moveTo(hx, hy);
-      ctx.lineTo(hx + fx * 46, hy + fy * 46);
-      ctx.stroke();
+      ctx.save();
+      ctx.translate(hx, hy);
+      ctx.rotate(v.angle);
+      ctx.globalAlpha = wet * 0.7;
+      ctx.drawImage(this.headlightSprite(), 0, -v.width * 0.5, 46, v.width);
       ctx.restore();
-    }
-
-    // Puddles carry a wobbling mirror of the sky.
-    for (const puddle of game.city.puddles) {
-      if (!this.inView(puddle.x, puddle.y, 70)) continue;
-      ctx.fillStyle = css(light.sky, 0.08 + wet * 0.07);
-      ctx.beginPath();
-      ctx.ellipse(puddle.x, puddle.y, puddle.rx * 0.92, puddle.ry * 0.8, puddle.angle, 0, TAU);
-      ctx.fill();
-      ctx.strokeStyle = `rgba(232, 252, 255, ${0.10 * wet})`;
-      ctx.lineWidth = 0.9;
-      ctx.beginPath();
-      ctx.ellipse(
-        puddle.x + Math.sin(time * 1.1 + puddle.seed) * 3,
-        puddle.y,
-        puddle.rx * 0.55,
-        puddle.ry * 0.45,
-        puddle.angle,
-        0,
-        TAU,
-      );
-      ctx.stroke();
+      ctx.restore();
     }
     ctx.restore();
   }
@@ -1647,36 +1896,7 @@ export class Renderer {
     const wet = game.weather?.wetness || 0;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    for (const light of game.city.streetlights) {
-      if (!this.inView(light.x, light.y, light.radius + 20)) continue;
-      const r = light.radius * (0.72 + wet * 0.16);
-      const g = ctx.createRadialGradient(light.x, light.y, 1, light.x, light.y, r);
-      g.addColorStop(0, `rgba(255, 232, 184, ${0.30 * dark})`);
-      g.addColorStop(0.26, `rgba(255, 219, 158, ${0.16 * dark})`);
-      g.addColorStop(0.6, `rgba(255, 202, 136, ${0.055 * dark})`);
-      g.addColorStop(1, 'rgba(255, 186, 112, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(light.x, light.y, r, 0, TAU);
-      ctx.fill();
-      // Lamp core.
-      ctx.fillStyle = `rgba(255, 250, 224, ${0.85 * dark})`;
-      ctx.beginPath();
-      ctx.arc(light.x, light.y - 10, 3.8, 0, TAU);
-      ctx.fill();
-    }
-    // Warm spill from windows and diner signage.
-    for (const b of game.city.buildings) {
-      if (!b.neonText || !this.inView(b.x, b.y, 80)) continue;
-      const g = ctx.createRadialGradient(b.x, b.y, 2, b.x, b.y, 54);
-      g.addColorStop(0, alpha(b.neonColor || '#ff7fa5', 0.10 * dark));
-      g.addColorStop(0.55, alpha(b.neonColor || '#ff7fa5', 0.035 * dark));
-      g.addColorStop(1, alpha(b.neonColor || '#ff7fa5', 0));
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, 54, 0, TAU);
-      ctx.fill();
-    }
+    this.drawWorldLayer(ctx, this._lightLayer, dark * (0.78 + wet * 0.16));
     ctx.restore();
   }
 
@@ -1696,17 +1916,14 @@ export class Renderer {
       const lampX = cop.x - fx * cop.length * 0.04;
       const lampY = cop.y - fy * cop.length * 0.04;
       const pulse = 0.55 + 0.45 * Math.sin(time * 9 + (cop.sirenPhase ? 0 : Math.PI));
-      for (const [side, rgb] of [[-cop.width * 0.26, cop.sirenPhase ? '255, 72, 92' : '255, 42, 70'], [cop.width * 0.26, cop.sirenPhase ? '68, 130, 255' : '130, 176, 255']]) {
+      for (const [side, red] of [[-cop.width * 0.26, cop.sirenPhase], [cop.width * 0.26, !cop.sirenPhase]]) {
         const gx = lampX + rx * side;
         const gy = lampY + ry * side;
         const radius = 21 + pulse * 7;
-        const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, radius);
-        g.addColorStop(0, `rgba(${rgb}, ${0.48 * pulse + 0.16})`);
-        g.addColorStop(0.24, `rgba(${rgb}, ${0.25 * pulse})`);
-        g.addColorStop(0.62, `rgba(${rgb}, ${0.055 * pulse})`);
-        g.addColorStop(1, `rgba(${rgb}, 0)`);
-        ctx.fillStyle = g;
-        ctx.fillRect(gx - radius, gy - radius, radius * 2, radius * 2);
+        const sprite = red
+          ? this.radialSprite('siren-halo-red', 32, [[0, 'rgba(255, 72, 92, 1)'], [0.24, 'rgba(255, 72, 92, 0.52)'], [0.62, 'rgba(255, 72, 92, 0.11)'], [1, 'rgba(255, 72, 92, 0)']])
+          : this.radialSprite('siren-halo-blue', 32, [[0, 'rgba(88, 150, 255, 1)'], [0.24, 'rgba(88, 150, 255, 0.52)'], [0.62, 'rgba(88, 150, 255, 0.11)'], [1, 'rgba(88, 150, 255, 0)']]);
+        this.drawGlow(ctx, sprite, gx, gy, radius, 0.42 * pulse + 0.12);
       }
     }
     ctx.restore();
@@ -1717,6 +1934,25 @@ export class Renderer {
     if (!police || police.wantedStars <= 0) return;
     const ctx = this.ctx;
     const time = game.worldTime || 0;
+    if (!this._searchCone) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 256;
+      const g = canvas.getContext('2d');
+      g.translate(128, 128);
+      const beam = g.createRadialGradient(0, 0, 4, 0, 0, 126);
+      beam.addColorStop(0, 'rgba(142, 200, 255, 0.09)');
+      beam.addColorStop(0.4, 'rgba(126, 184, 255, 0.05)');
+      beam.addColorStop(0.8, 'rgba(108, 168, 255, 0.012)');
+      beam.addColorStop(1, 'rgba(96, 156, 255, 0)');
+      g.fillStyle = beam;
+      g.beginPath();
+      g.moveTo(0, 0);
+      g.arc(0, 0, 126, -0.39, 0.39);
+      g.closePath();
+      g.fill();
+      this._searchCone = canvas;
+    }
     const units = [
       ...(police.cops || []).map((cop) => ({ x: cop.x, y: cop.y, angle: cop.angle, radius: 220, wide: 0.5 })),
       ...(police.footCops || []).filter((cop) => !cop.isDead).map((cop) => ({ x: cop.x, y: cop.y, angle: cop.angle, radius: 150, wide: 0.62 })),
@@ -1730,26 +1966,8 @@ export class Renderer {
       ctx.save();
       ctx.translate(unit.x, unit.y);
       ctx.rotate(unit.angle + sway);
-      const beam = ctx.createRadialGradient(0, 0, 8, 0, 0, reach);
-      beam.addColorStop(0, 'rgba(142, 200, 255, 0.045)');
-      beam.addColorStop(0.4, 'rgba(126, 184, 255, 0.025)');
-      beam.addColorStop(0.8, 'rgba(108, 168, 255, 0.006)');
-      beam.addColorStop(1, 'rgba(96, 156, 255, 0)');
-      ctx.fillStyle = beam;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.arc(0, 0, reach, -unit.wide * 0.78, unit.wide * 0.78);
-      ctx.closePath();
-      ctx.fill();
-      // Searchlight dust cone.
-      ctx.strokeStyle = 'rgba(156, 208, 255, 0.08)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(reach, -reach * unit.wide * 0.75);
-      ctx.moveTo(0, 0);
-      ctx.lineTo(reach, reach * unit.wide * 0.75);
-      ctx.stroke();
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(this._searchCone, -reach * 0.57, -reach * 0.57, reach * 1.14, reach * 1.14);
       ctx.restore();
     }
     ctx.restore();
@@ -1773,19 +1991,8 @@ export class Renderer {
       ctx.save();
       ctx.translate(noseX, noseY);
       ctx.rotate(v.angle);
-      const g = ctx.createLinearGradient(0, 0, reach, 0);
-      g.addColorStop(0, `rgba(255, 242, 210, ${(0.10 + wet * 0.05) * dark + wet * 0.025})`);
-      g.addColorStop(0.22, `rgba(255, 235, 194, ${(0.06 + wet * 0.035) * dark})`);
-      g.addColorStop(0.62, `rgba(255, 225, 176, ${0.02 * dark})`);
-      g.addColorStop(1, 'rgba(255, 216, 160, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(0, -v.width * 0.26);
-      ctx.lineTo(reach, -v.width * 0.52);
-      ctx.lineTo(reach, v.width * 0.52);
-      ctx.lineTo(0, v.width * 0.26);
-      ctx.closePath();
-      ctx.fill();
+      ctx.globalAlpha = clamp(dark * 0.85 + wet * 0.25, 0, 1);
+      ctx.drawImage(this.headlightSprite(), 0, -v.width * 0.8, reach, v.width * 1.6);
       ctx.restore();
     }
     ctx.restore();
@@ -1938,14 +2145,12 @@ export class Renderer {
       const lampY = light.y + 24;
       const color = red ? '255, 86, 96' : '104, 238, 158';
       const pulse = 0.6 + 0.4 * Math.sin(time * (red ? 4.4 : 2.2) + light.timer);
+      const sprite = red
+        ? this.radialSprite('signal-red', 24, [[0, 'rgba(255, 86, 96, 1)'], [0.45, 'rgba(255, 86, 96, 0.28)'], [1, 'rgba(255, 86, 96, 0)']])
+        : this.radialSprite('signal-green', 24, [[0, 'rgba(104, 238, 158, 1)'], [0.45, 'rgba(104, 238, 158, 0.28)'], [1, 'rgba(104, 238, 158, 0)']]);
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      const halo = ctx.createRadialGradient(light.x, lampY, 0, light.x, lampY, 17 + pulse * 5);
-      halo.addColorStop(0, `rgba(${color}, ${(0.42 + dark * 0.36) * pulse})`);
-      halo.addColorStop(0.45, `rgba(${color}, ${0.12 * pulse})`);
-      halo.addColorStop(1, `rgba(${color}, 0)`);
-      ctx.fillStyle = halo;
-      ctx.fillRect(light.x - 24, lampY - 24, 48, 48);
+      this.drawGlow(ctx, sprite, light.x, lampY, 17 + pulse * 5, 0.42 + dark * 0.36);
       ctx.restore();
 
       ctx.fillStyle = `rgba(${color}, 0.94)`;
@@ -2041,12 +2246,13 @@ export class Renderer {
     const people = this.visiblePeople(game);
     for (const person of people) {
       if (person.isDead) continue;
-      const size = person.isPlayer ? 15 : person.isBoss ? 16 : 13;
+      const size = person.isPlayer ? 17 : person.isBoss ? 18 : 15;
       ctx.save();
-      ctx.translate(person.x + dx * 0.25, person.y + dy * 0.25);
+      ctx.translate(person.x + dx * 0.22, person.y + dy * 0.22 + 2);
       ctx.rotate(person.angle);
+      ctx.fillStyle = `rgba(9, 11, 15, ${0.2 + light.day * 0.14})`;
       ctx.beginPath();
-      ctx.ellipse(0, 2, size * 1.05, size * 0.62, 0, 0, TAU);
+      ctx.ellipse(-1, 0, size * 0.86, size * 0.56, 0, 0, TAU);
       ctx.fill();
       ctx.restore();
     }
@@ -2055,32 +2261,37 @@ export class Renderer {
 
   visibleVehicles(game) {
     if (this._vehicleCacheFrame === this.frameIndex) return this._vehicleCache;
-    const out = [];
+    const out = this._vehicleCache;
+    out.length = 0;
     for (const list of [game.traffic?.vehicles, game.traffic?.parked, game.police?.cops, game.police?.roadblocks]) {
       if (!list) continue;
       for (const v of list) if (this.inView(v.x, v.y, 110)) out.push(v);
     }
-    this._vehicleCache = out;
     this._vehicleCacheFrame = this.frameIndex;
     return out;
   }
 
   visiblePeople(game) {
-    const out = [];
+    if (this._peopleCacheFrame === this.frameIndex) return this._peopleCache;
+    const out = this._peopleCache;
+    out.length = 0;
     if (game.player) out.push(game.player);
     for (const p of game.combat?.pedestrians || []) if (this.inView(p.x, p.y, 60)) out.push(p);
     for (const e of game.combat?.enemies || []) if (this.inView(e.x, e.y, 60)) out.push(e);
     for (const f of game.police?.footCops || []) if (this.inView(f.x, f.y, 60)) out.push(f);
     if (game.player?.isInVehicle) out.shift();
+    this._peopleCacheFrame = this.frameIndex;
     return out;
   }
 
   paintActors(game) {
     const ctx = this.ctx;
-    const actors = [];
-    for (const v of this.visibleVehicles(game)) actors.push({ kind: 'vehicle', y: v.y + v.length * 0.3, ref: v });
-    for (const p of this.visiblePeople(game)) actors.push({ kind: 'person', y: p.y + 6, ref: p });
-    actors.sort((a, b) => a.y - b.y);
+    const actors = this._actorCache;
+    actors.length = 0;
+    for (const v of this.visibleVehicles(game)) actors.push(v);
+    for (const p of this.visiblePeople(game)) actors.push(p);
+    const depth = (a) => (a.config ? a.y + a.length * 0.3 : a.y + 6);
+    actors.sort((a, b) => depth(a) - depth(b));
 
     // Dead bodies first, flat on the ground.
     for (const p of game.combat?.pedestrians || []) {
@@ -2094,8 +2305,8 @@ export class Renderer {
     }
 
     for (const actor of actors) {
-      if (actor.kind === 'vehicle') this.paintVehicle(ctx, game, actor.ref);
-      else this.paintPerson(ctx, actor.ref);
+      if (actor.config) this.paintVehicle(ctx, game, actor);
+      else this.paintPerson(ctx, actor);
     }
   }
 
@@ -2132,11 +2343,7 @@ export class Renderer {
 
     // Body silhouette.
     const bodyColor = this.litColor(v.color || '#8f97a2', 0.34);
-    const g = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
-    g.addColorStop(0, shade(bodyColor, 0.22));
-    g.addColorStop(0.35, bodyColor);
-    g.addColorStop(1, shade(bodyColor, -0.28));
-    ctx.fillStyle = g;
+    ctx.fillStyle = this.bodyGradient(ctx, bodyColor, W);
 
     if (body === 'bike') {
       ctx.fillStyle = '#1a1a1e';
@@ -2357,22 +2564,19 @@ export class Renderer {
   }
 
   paintFlame(ctx, x, y, scale) {
-    const flicker = 0.7 + Math.random() * 0.4;
-    const g = ctx.createRadialGradient(x, y, 1, x, y, 12 * scale);
-    g.addColorStop(0, `rgba(255, 236, 160, ${0.8 * flicker})`);
-    g.addColorStop(0.35, `rgba(255, 142, 50, ${0.6 * flicker})`);
-    g.addColorStop(1, 'rgba(255, 70, 20, 0)');
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(x, y, 12 * scale, 0, TAU);
-    ctx.fill();
+    const flicker = 0.7 + Math.sin((this.frameIndex + x + y) * 2.7) * 0.3;
+    const sprite = this.radialSprite('flame', 24, [[0, 'rgba(255, 236, 160, 0.8)'], [0.35, 'rgba(255, 142, 50, 0.6)'], [1, 'rgba(255, 70, 20, 0)']]);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    this.drawGlow(ctx, sprite, x, y, 12 * scale, flicker);
+    ctx.restore();
   }
 
   paintPerson(ctx, p) {
     const isPlayer = !!p.isPlayer;
     const isCop = !!p.isCop;
     const isEnemy = !!p.isEnemy;
-    const scale = p.isBoss ? 1.14 : 1;
+    const scale = p.isBoss ? 1.22 : isPlayer ? 1.16 : 1.12;
     const x = p.x;
     const y = p.y;
     const walk = p.moving ? Math.sin((p.walkPhase || 0) * 6) : 0;
@@ -2382,34 +2586,57 @@ export class Renderer {
     ctx.rotate(p.angle);
     ctx.scale(scale, scale);
 
-    // Legs.
+    // Legs with a readable stride: hips stay under the shoulders, feet swing
+    // fore and aft so a walking pedestrian reads as a person from above.
     if (!p.isDead) {
       ctx.strokeStyle = this.litColor(p.pants || (isCop ? '#202938' : '#38404d'), 0.45);
-      ctx.lineWidth = 4.2;
+      ctx.lineWidth = 3.8;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(-1, -3.2);
-      ctx.lineTo(-6 + walk * 3, -7.5);
-      ctx.moveTo(-1, 3.2);
-      ctx.lineTo(-6 - walk * 3, 7.5);
+      ctx.moveTo(-1.5, -3.6);
+      ctx.lineTo(-7 + walk * 4.2, -6.2);
+      ctx.moveTo(-1.5, 3.6);
+      ctx.lineTo(-7 - walk * 4.2, 6.2);
       ctx.stroke();
+      ctx.fillStyle = this.litColor('#23222a', 0.55);
+      ctx.beginPath();
+      ctx.ellipse(-7 + walk * 4.2, -6.2, 2.1, 1.5, 0, 0, TAU);
+      ctx.ellipse(-7 - walk * 4.2, 6.2, 2.1, 1.5, 0, 0, TAU);
+      ctx.fill();
     }
 
-    // Torso / shoulders with a readable shirt panel.
+    // Torso and shoulders. The chest is wider across the body than it is long,
+    // which is what separates a person silhouette from a grey blob at 2x zoom.
     const shirtColor = this.litColor(isCop ? '#2f4660' : isEnemy ? (p.color || '#a3473c') : (p.shirt || '#9a6b72'), 0.42);
+    const outline = 'rgba(12, 14, 18, 0.46)';
     ctx.fillStyle = shirtColor;
     ctx.beginPath();
-    ctx.ellipse(-2, 0, 8.2, 6.4, 0, 0, TAU);
+    ctx.ellipse(-1.8, 0, 7.2, 7.8, 0, 0, TAU);
     ctx.fill();
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.10)';
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // Shoulder caps.
+    ctx.fillStyle = this.litColor(isCop ? '#3a526d' : isEnemy ? (p.color || '#a3473c') : (p.shirt || '#9a6b72'), 0.36);
     ctx.beginPath();
-    ctx.ellipse(-2.4, -1.4, 5.2, 2.2, 0, 0, TAU);
+    ctx.ellipse(-2.4, -6.2, 3.4, 2.8, -0.25, 0, TAU);
+    ctx.ellipse(-2.4, 6.2, 3.4, 2.8, 0.25, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.13)';
+    ctx.beginPath();
+    ctx.ellipse(-1.8, -1.8, 5.2, 2.2, 0, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(12, 14, 18, 0.2)';
+    ctx.beginPath();
+    ctx.ellipse(-4.4, 0, 2.4, 5.4, 0, 0, TAU);
     ctx.fill();
     if (isCop) {
       ctx.fillStyle = '#d9e2e8';
-      ctx.fillRect(-5, -5.5, 3, 11);
+      ctx.fillRect(-4.8, -5.6, 3, 11.2);
       ctx.fillStyle = '#86b8e6';
       ctx.fillRect(1, -1.4, 3, 2.8);
+      ctx.fillStyle = '#e8b04a';
+      ctx.fillRect(-3.6, -1.2, 1.6, 2.4);
     }
     if (isEnemy && p.isBoss) {
       ctx.fillStyle = '#e8b04a';
@@ -2420,17 +2647,19 @@ export class Renderer {
     const weapon = p.weapon?.id || (isCop ? 'pistol' : 'pistol');
     const armed = (isPlayer || isCop || isEnemy) && weapon !== 'fists';
     ctx.strokeStyle = shirtColor;
-    ctx.lineWidth = 2.6;
+    ctx.lineWidth = 2.9;
     ctx.lineCap = 'round';
     ctx.beginPath();
     if (armed) {
-      ctx.moveTo(-1, -5);
-      ctx.lineTo(5, -6.5 + walk * 0.8);
+      ctx.moveTo(-1, -5.4);
+      ctx.lineTo(5, -6.8 + walk * 0.8);
+      ctx.moveTo(-1, 5.4);
+      ctx.lineTo(2.2, 7.2 - walk * 0.5);
     } else {
-      ctx.moveTo(-1, -5);
-      ctx.lineTo(4 + walk * 2.6, -7.4);
-      ctx.moveTo(-1, 5);
-      ctx.lineTo(4 - walk * 2.6, 7.4);
+      ctx.moveTo(-1, -5.6);
+      ctx.lineTo(4 + walk * 3.2, -7.4);
+      ctx.moveTo(-1, 5.6);
+      ctx.lineTo(4 - walk * 3.2, 7.4);
     }
     ctx.stroke();
     if (armed) {
@@ -2456,27 +2685,39 @@ export class Renderer {
       ctx.stroke();
     }
 
-    // Head and hair.
+    // Neck, head and hair. The face sits forward of the shoulder line.
     ctx.fillStyle = this.litColor(p.skin || (isCop ? '#c79a76' : isEnemy ? '#c69268' : '#d9a97f'), 0.38);
     ctx.beginPath();
-    ctx.arc(2.2, 0, 4.4, 0, TAU);
+    ctx.arc(1.2, 0, 3.1, 0, TAU);
     ctx.fill();
+    ctx.beginPath();
+    ctx.arc(3.7, 0, 4.7, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(28, 20, 18, 0.42)';
+    ctx.lineWidth = 0.9;
+    ctx.stroke();
     ctx.fillStyle = this.litColor(p.hair || (isCop ? '#26303d' : '#2b211c'), 0.6);
     ctx.beginPath();
-    ctx.arc(1.8, 0, 4.7, Math.PI * 0.55, Math.PI * 1.45);
+    ctx.arc(3.2, 0, 5, Math.PI * 0.52, Math.PI * 1.48);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 235, 200, 0.22)';
+    ctx.beginPath();
+    ctx.arc(5.1, -1.1, 1.1, 0, TAU);
     ctx.fill();
     if (isCop) {
       ctx.strokeStyle = '#89a6c2';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.arc(2.2, 0, 5.2, Math.PI * 0.35, Math.PI * 1.65);
+      ctx.arc(3.4, 0, 5.4, Math.PI * 0.35, Math.PI * 1.65);
       ctx.stroke();
     }
     if (p.hat) {
       ctx.fillStyle = this.litColor('#d8c79c', 0.7);
       ctx.beginPath();
-      ctx.arc(1, 0, 5, 0, TAU);
+      ctx.arc(2.3, 0, 5.2, 0, TAU);
       ctx.fill();
+      ctx.fillStyle = 'rgba(60, 46, 30, 0.5)';
+      ctx.fillRect(1.6, -4.6, 1.2, 9.2);
     }
 
     // Accessories.
@@ -2561,21 +2802,26 @@ export class Renderer {
     ctx.globalCompositeOperation = 'lighter';
     for (const b of combat.bullets || []) {
       if (!this.inView(b.x, b.y, 40)) continue;
-      const sx = b.px ?? b.x - Math.cos(b.angle) * 30;
-      const sy = b.py ?? b.y - Math.sin(b.angle) * 30;
+      let sx = b.px ?? b.x - Math.cos(b.angle) * 30;
+      let sy = b.py ?? b.y - Math.sin(b.angle) * 30;
+      const full = Math.hypot(b.x - sx, b.y - sy);
+      if (full > 34) {
+        sx = b.x - Math.cos(b.angle) * 34;
+        sy = b.y - Math.sin(b.angle) * 34;
+      }
       const grad = ctx.createLinearGradient(sx, sy, b.x, b.y);
       grad.addColorStop(0, 'rgba(255, 190, 90, 0)');
-      grad.addColorStop(0.7, 'rgba(255, 220, 140, 0.55)');
-      grad.addColorStop(1, 'rgba(255, 250, 220, 0.95)');
+      grad.addColorStop(0.62, 'rgba(255, 220, 140, 0.46)');
+      grad.addColorStop(1, 'rgba(255, 250, 220, 0.88)');
       ctx.strokeStyle = grad;
-      ctx.lineWidth = 1.6;
+      ctx.lineWidth = 1.15;
       ctx.beginPath();
       ctx.moveTo(sx, sy);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
       ctx.fillStyle = '#fff6d0';
       ctx.beginPath();
-      ctx.arc(b.x, b.y, 2, 0, TAU);
+      ctx.arc(b.x, b.y, 1.45, 0, TAU);
       ctx.fill();
     }
     ctx.restore();
@@ -2614,7 +2860,7 @@ export class Renderer {
     const ps = game.particles;
     if (!ps) return;
     const ctx = this.ctx;
-    const flameTypes = new Set(['spark', 'hit', 'muzzle', 'explosion_fire', 'shockwave', 'rain', 'splash']);
+    const flameTypes = this._flameTypes;
 
     // Soft pass: smoke, dust and debris first so sparks read on top.
     for (const p of ps.particles) {
@@ -2623,26 +2869,14 @@ export class Renderer {
       const life = clamp(p.life / (p.maxLife || 1), 0, 1);
       if (p.type === 'smoke') {
         const r = p.size * (1.0 - life * 0.35);
-        const g = ctx.createRadialGradient(p.x, p.y, 1, p.x, p.y, r);
-        g.addColorStop(0, p.color || 'rgba(130, 128, 132, 0.4)');
-        g.addColorStop(0.55, p.color || 'rgba(130, 128, 132, 0.25)');
-        g.addColorStop(1, 'rgba(90, 90, 96, 0)');
-        ctx.fillStyle = g;
-        ctx.globalAlpha = life * 0.08;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, r, 0, TAU);
-        ctx.fill();
+        const color = p.color || 'rgba(130, 128, 132, 0.4)';
+        const sprite = this.radialSprite(`smoke:${color}`, 32, [[0, color], [0.55, color], [1, 'rgba(90, 90, 96, 0)']]);
+        this.drawGlow(ctx, sprite, p.x, p.y, r, life * 0.16);
       } else if (p.type === 'dust') {
         const r = p.size * (1.4 - life * 0.4);
-        const g = ctx.createRadialGradient(p.x, p.y, 1, p.x, p.y, r);
-        g.addColorStop(0, p.color || 'rgba(218, 205, 180, 0.5)');
-        g.addColorStop(0.5, p.color || 'rgba(218, 205, 180, 0.3)');
-        g.addColorStop(1, 'rgba(190, 176, 150, 0)');
-        ctx.fillStyle = g;
-        ctx.globalAlpha = life * 0.08;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, r, 0, TAU);
-        ctx.fill();
+        const color = p.color || 'rgba(218, 205, 180, 0.5)';
+        const sprite = this.radialSprite(`dust:${color}`, 32, [[0, color], [0.5, color], [1, 'rgba(190, 176, 150, 0)']]);
+        this.drawGlow(ctx, sprite, p.x, p.y, r, life * 0.2);
       } else if (p.type === 'casing' || p.type === 'glass' || p.type === 'debris') {
         ctx.globalAlpha = clamp(life * 1.4, 0, 1);
         ctx.fillStyle = p.type === 'casing' ? '#d8b877' : p.color || '#8f9a9c';
@@ -2675,15 +2909,8 @@ export class Renderer {
         ctx.fill();
       } else if (p.type === 'explosion_fire') {
         const r = p.size * (1.6 - life * 0.8);
-        const g = ctx.createRadialGradient(p.x, p.y, 1, p.x, p.y, r);
-        g.addColorStop(0, `rgba(255, 248, 196, ${Math.min(1, life * 1.3)})`);
-        g.addColorStop(0.34, `rgba(255, 156, 52, ${life * 0.82})`);
-        g.addColorStop(1, 'rgba(216, 42, 12, 0)');
-        ctx.fillStyle = g;
-        ctx.globalAlpha = 1;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, r, 0, TAU);
-        ctx.fill();
+        const sprite = this.radialSprite('fire-burst', 32, [[0, 'rgba(255, 248, 196, 1)'], [0.34, 'rgba(255, 156, 52, 0.82)'], [1, 'rgba(216, 42, 12, 0)']]);
+        this.drawGlow(ctx, sprite, p.x, p.y, r, Math.min(1, life * 1.3));
       } else if (p.type === 'rain' || p.type === 'splash') {
         ctx.strokeStyle = p.color || 'rgba(205, 235, 240, 0.5)';
         ctx.globalAlpha = life * 0.34;
@@ -2693,24 +2920,23 @@ export class Renderer {
         ctx.arc(p.x, p.y, r, Math.PI * 0.15, Math.PI * 0.85);
         ctx.stroke();
       } else if (p.type === 'muzzle') {
-        const g = ctx.createRadialGradient(p.x, p.y, 1, p.x, p.y, p.size * 2.4);
-        g.addColorStop(0, 'rgba(255, 248, 210, 0.95)');
-        g.addColorStop(0.4, 'rgba(255, 196, 92, 0.48)');
-        g.addColorStop(1, 'rgba(255, 140, 40, 0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * 2.4, 0, TAU);
-        ctx.fill();
+        const flash = clamp(p.life / (p.maxLife || 0.075), 0, 1);
+        const size = Math.max(3, p.size * 0.78);
         ctx.save();
         ctx.translate(p.x, p.y);
         ctx.rotate(p.angle || 0);
-        ctx.fillStyle = 'rgba(255, 240, 180, 0.75)';
+        ctx.globalAlpha = flash;
+        ctx.fillStyle = 'rgba(255, 238, 178, 0.82)';
         ctx.beginPath();
         ctx.moveTo(0, 0);
-        ctx.lineTo(p.size * 2.2, -p.size * 0.5);
-        ctx.lineTo(p.size * 1.6, 0);
-        ctx.lineTo(p.size * 2.2, p.size * 0.5);
+        ctx.lineTo(size * 1.55, -size * 0.24);
+        ctx.lineTo(size * 1.05, 0);
+        ctx.lineTo(size * 1.55, size * 0.24);
         ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255, 250, 218, 0.95)';
+        ctx.beginPath();
+        ctx.arc(size * 0.18, 0, size * 0.32, 0, TAU);
         ctx.fill();
         ctx.restore();
       } else if (p.type === 'shockwave') {
@@ -2757,18 +2983,14 @@ export class Renderer {
 
   paintMuzzleLight(game) {
     const ctx = this.ctx;
-    const time = game.worldTime || 0;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     for (const p of game.particles.particles) {
       if (p.type !== 'muzzle') continue;
       if (!this.inView(p.x, p.y, 70)) continue;
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 30 + Math.sin(time * 30) * 4);
-      g.addColorStop(0, 'rgba(255, 242, 198, 0.18)');
-      g.addColorStop(0.5, 'rgba(255, 192, 108, 0.06)');
-      g.addColorStop(1, 'rgba(255, 160, 60, 0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(p.x - 38, p.y - 38, 76, 76);
+      const sprite = this.radialSprite('muzzle-light', 24, [[0, 'rgba(255, 242, 198, 0.18)'], [0.5, 'rgba(255, 192, 108, 0.06)'], [1, 'rgba(255, 160, 60, 0)']]);
+      const radius = 15 + p.size * 0.28;
+      this.drawGlow(ctx, sprite, p.x, p.y, radius, clamp(p.life / (p.maxLife || 0.075), 0, 1));
     }
     ctx.restore();
   }
@@ -2793,12 +3015,8 @@ export class Renderer {
       const bob = Math.sin(p.bob) * 3;
       ctx.save();
       ctx.translate(p.x, p.y + bob);
-      const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 17);
-      g.addColorStop(0, alpha(p.def.color, 0.36));
-      g.addColorStop(0.55, alpha(p.def.color, 0.1));
-      g.addColorStop(1, alpha(p.def.color, 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(-18, -18, 36, 36);
+      const glow = this.radialSprite(`pickup:${p.def.color}`, 18, [[0, alpha(p.def.color, 0.36)], [0.55, alpha(p.def.color, 0.1)], [1, alpha(p.def.color, 0)]]);
+      this.drawGlow(ctx, glow, 0, 0, 18, 1);
       ctx.fillStyle = p.def.color;
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
       ctx.lineWidth = 1;
@@ -2849,12 +3067,8 @@ export class Renderer {
       const bob = Math.sin(item.bob) * 4;
       ctx.save();
       ctx.translate(item.x, item.y + bob);
-      const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 24);
-      g.addColorStop(0, alpha(item.color, 0.3));
-      g.addColorStop(0.55, alpha(item.color, 0.08));
-      g.addColorStop(1, alpha(item.color, 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(-24, -24, 48, 48);
+      const glow = this.radialSprite(`tape:${item.color}`, 24, [[0, alpha(item.color, 0.3)], [0.55, alpha(item.color, 0.08)], [1, alpha(item.color, 0)]]);
+      this.drawGlow(ctx, glow, 0, 0, 24, 1);
       ctx.rotate(Math.sin(item.bob * 0.55) * 0.15);
       ctx.fillStyle = 'rgba(20, 18, 24, 0.88)';
       pathRound(ctx, -11, -7, 22, 14, 2);
@@ -2905,17 +3119,11 @@ export class Renderer {
     ctx.arc(0, 0, radius * (1.1 + pulse * 0.06), 0, TAU);
     ctx.stroke();
     if (available) {
-      const g = ctx.createLinearGradient(0, -70, 0, 0);
-      g.addColorStop(0, 'rgba(255, 209, 102, 0)');
-      g.addColorStop(1, 'rgba(255, 209, 102, 0.15)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(-11, 0);
-      ctx.lineTo(-4, -70);
-      ctx.lineTo(4, -70);
-      ctx.lineTo(11, 0);
-      ctx.closePath();
-      ctx.fill();
+      const beam = this.linearSprite('marker-beam', 22, 70, [
+        [0, 'rgba(255, 209, 102, 0)'],
+        [1, 'rgba(255, 209, 102, 0.15)'],
+      ], true);
+      ctx.drawImage(beam, -11, -70, 22, 70);
       pathStar(ctx, 0, -9, 7 + pulse * 1.8);
       ctx.fillStyle = '#ffd166';
       ctx.fill();
@@ -2984,64 +3192,78 @@ export class Renderer {
     const light = this.light;
     const w = game.weather;
 
-    // Final tint is intentionally light: the heavy lifting is the world-space
-    // ambient pass that runs before the lamps.
-    const wash = ctx.createLinearGradient(0, 0, this.width, this.height);
-    wash.addColorStop(0, css(light.sky, 0.02 + light.dark * 0.035));
-    wash.addColorStop(0.55, css(light.ambient, 0.01 + light.dark * 0.02));
-    wash.addColorStop(1, css(light.base, 0.015 + light.dark * 0.04));
-    ctx.fillStyle = wash;
-    ctx.fillRect(0, 0, this.width, this.height);
-
-    // District neon haze at night.
-    if (light.dark > 0.4) {
-      const district = districtAt(game.player.x, game.player.y);
-      const tint = district?.neon || '#6fe0e6';
-      const g = ctx.createLinearGradient(0, this.height, this.width, 0);
-      g.addColorStop(0, alpha(tint, 0.05 * light.dark));
-      g.addColorStop(0.6, 'rgba(255, 111, 145, 0.02)');
-      g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, this.width, this.height);
+    // One cached tint/vignette screen replaces several full-screen gradient
+    // passes. It is rebuilt only when the light bucket changes, then blitted
+    // 1:1 so the software rasteriser never has to rescale it every frame.
+    if (!this._gradeSmall) {
+      this._gradeSmall = document.createElement('canvas');
+      this._gradeSmall.width = this.width;
+      this._gradeSmall.height = this.height;
     }
-
-    // Golden hour warmth.
-    if (light.golden > 0.15) {
-      const g = ctx.createLinearGradient(0, this.height, this.width, 0);
-      g.addColorStop(0, `rgba(255, 122, 76, ${light.golden * 0.20})`);
-      g.addColorStop(0.6, `rgba(220, 100, 120, ${light.golden * 0.10})`);
-      g.addColorStop(1, 'rgba(90, 60, 120, 0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, this.width, this.height);
+    const key = `${Math.round(light.raw * 480)}:${Math.round(light.golden * 20)}:${Math.round(light.dark * 30)}:${districtAt(game.player.x, game.player.y).id}`;
+    if (this._gradeKey !== key) {
+      this._gradeKey = key;
+      const W = this.width;
+      const H = this.height;
+      const g = this._gradeSmall.getContext('2d');
+      g.clearRect(0, 0, W, H);
+      const wash = g.createLinearGradient(0, 0, W, H);
+      wash.addColorStop(0, css(light.sky, 0.02 + light.dark * 0.035));
+      wash.addColorStop(0.55, css(light.ambient, 0.01 + light.dark * 0.02));
+      wash.addColorStop(1, css(light.base, 0.015 + light.dark * 0.04));
+      g.fillStyle = wash;
+      g.fillRect(0, 0, W, H);
+      if (light.dark > 0.4) {
+        const tint = districtAt(game.player.x, game.player.y)?.neon || '#6fe0e6';
+        const neon = g.createLinearGradient(0, H, W, 0);
+        neon.addColorStop(0, alpha(tint, 0.05 * light.dark));
+        neon.addColorStop(0.6, 'rgba(255, 111, 145, 0.02)');
+        neon.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        g.fillStyle = neon;
+        g.fillRect(0, 0, W, H);
+      }
+      if (light.golden > 0.15) {
+        const warm = g.createLinearGradient(0, H, W, 0);
+        warm.addColorStop(0, `rgba(255, 122, 76, ${light.golden * 0.20})`);
+        warm.addColorStop(0.6, `rgba(220, 100, 120, ${light.golden * 0.10})`);
+        warm.addColorStop(1, 'rgba(90, 60, 120, 0)');
+        g.fillStyle = warm;
+        g.fillRect(0, 0, W, H);
+      }
+      // Vignette rides the same pass instead of another full-screen blit.
+      const vig = g.createRadialGradient(W / 2, H / 2, H * 0.36, W / 2, H / 2, W * 0.7);
+      vig.addColorStop(0, 'rgba(8, 8, 14, 0)');
+      vig.addColorStop(1, `rgba(8, 8, 14, ${0.32 + light.dark * 0.2})`);
+      g.fillStyle = vig;
+      g.fillRect(0, 0, W, H);
     }
+    ctx.drawImage(this._gradeSmall, 0, 0);
 
-    // Sun / moon disc and bloom.
     const sx = this.width * light.sunX;
     const sy = this.height * light.sunY;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     if (light.day > 0.16) {
-      const r = 26 + Math.sin((game.timeOfDay || 0) * TAU) * 4;
-      const sun = ctx.createRadialGradient(sx, sy, 4, sx, sy, this.width * 0.62);
-      sun.addColorStop(0, `rgba(255, 238, 188, ${0.28 * light.day})`);
-      sun.addColorStop(0.16, `rgba(255, 206, 138, ${0.12 * light.day})`);
-      sun.addColorStop(0.5, `rgba(255, 162, 110, ${0.04 * light.day})`);
-      sun.addColorStop(1, 'rgba(255, 140, 100, 0)');
-      ctx.fillStyle = sun;
-      ctx.fillRect(0, 0, this.width, this.height);
+      const sun = this.radialSprite('sun-bloom', 256, [
+        [0, 'rgba(255, 238, 188, 1)'],
+        [0.16, 'rgba(255, 206, 138, 0.43)'],
+        [0.5, 'rgba(255, 162, 110, 0.14)'],
+        [1, 'rgba(255, 140, 100, 0)'],
+      ]);
+      this.drawGlow(ctx, sun, sx, sy, 330, 0.3 * light.day);
       ctx.fillStyle = `rgba(255, 250, 222, ${0.14 * light.day})`;
       ctx.beginPath();
-      ctx.arc(sx, sy, r, 0, TAU);
+      ctx.arc(sx, sy, 24, 0, TAU);
       ctx.fill();
     } else {
       const mx = this.width * 0.76;
       const my = this.height * 0.14;
-      const moon = ctx.createRadialGradient(mx, my, 3, mx, my, 220);
-      moon.addColorStop(0, 'rgba(204, 224, 255, 0.20)');
-      moon.addColorStop(0.35, 'rgba(150, 184, 255, 0.06)');
-      moon.addColorStop(1, 'rgba(120, 160, 255, 0)');
-      ctx.fillStyle = moon;
-      ctx.fillRect(0, 0, this.width, this.height);
+      const moon = this.radialSprite('moon-bloom', 128, [
+        [0, 'rgba(204, 224, 255, 0.62)'],
+        [0.35, 'rgba(150, 184, 255, 0.18)'],
+        [1, 'rgba(120, 160, 255, 0)'],
+      ]);
+      this.drawGlow(ctx, moon, mx, my, 220, 0.7);
       ctx.fillStyle = 'rgba(220, 234, 255, 0.22)';
       ctx.beginPath();
       ctx.arc(mx, my, 15, 0, TAU);
@@ -3058,11 +3280,16 @@ export class Renderer {
     }
     ctx.restore();
 
-    // Fog / haze / rain lens.
-    if (w && (w.type === 'haze' || w.type === 'rain' || w.type === 'storm')) {
-      const fog = w.type === 'storm' ? 0.09 : w.type === 'rain' ? 0.035 : 0.055;
-      ctx.fillStyle = `rgba(214, 226, 228, ${fog})`;
+    // Fog and wetness share one neutral fill. Rain streaks stay animated.
+    const fog = w && (w.type === 'storm') ? 0.09 : w?.type === 'rain' ? 0.035 : w?.type === 'haze' ? 0.055 : 0;
+    const wet = w?.wetness > 0.05 ? w.wetness * 0.048 : 0;
+    if (fog > 0.001 || wet > 0.001) {
+      ctx.fillStyle = wet > fog
+        ? `rgba(46, 84, 102, ${wet})`
+        : `rgba(214, 226, 228, ${fog})`;
       ctx.fillRect(0, 0, this.width, this.height);
+    }
+    if (w && (w.type === 'haze' || w.type === 'rain' || w.type === 'storm')) {
       const time = game.worldTime || 0;
       ctx.strokeStyle = `rgba(200, 230, 240, ${0.035 + (w.intensity || 0) * 0.05})`;
       ctx.lineWidth = 1;
@@ -3076,26 +3303,10 @@ export class Renderer {
       }
     }
 
-    if (w?.wetness > 0.05) {
-      ctx.fillStyle = `rgba(34, 78, 96, ${w.wetness * 0.048})`;
-      ctx.fillRect(0, 0, this.width, this.height);
-    }
-
     if (w?.flash > 0) {
       ctx.fillStyle = `rgba(220, 236, 255, ${Math.min(0.5, w.flash * 0.48)})`;
       ctx.fillRect(0, 0, this.width, this.height);
     }
-
-    // Vignette.
-    const vig = ctx.createRadialGradient(this.width / 2, this.height / 2, this.height * 0.36, this.width / 2, this.height / 2, this.width * 0.7);
-    vig.addColorStop(0, 'rgba(8, 8, 14, 0)');
-    vig.addColorStop(1, `rgba(8, 8, 14, ${0.34 + light.dark * 0.22})`);
-    ctx.fillStyle = vig;
-    ctx.fillRect(0, 0, this.width, this.height);
-
-    // Fine raster texture.
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.012)';
-    for (let y = 0; y < this.height; y += 4) ctx.fillRect(0, y, this.width, 1);
   }
 
   buildRainField() {

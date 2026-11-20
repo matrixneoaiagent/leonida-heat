@@ -1,4 +1,4 @@
-// Leonida Heat v4 - interface layer.
+// Leonida Heat v5 - interface layer.
 //
 // The HUD is built as a small set of "decks": a status deck (cash, health,
 // armour, heat), a live map panel, a job card, a weapon card and a radio strip.
@@ -277,6 +277,8 @@ export class HUD {
     }
     this.drawWeaponCard(ctx, game);
     this.drawJobCard(ctx, game);
+    this.drawActivityCards(ctx, game);
+    this.drawPhoneHint(ctx, game);
     this.drawDistrictBanner(ctx, game);
     this.drawToastStack(ctx, game);
     this.drawRadioDeck(ctx, game);
@@ -874,7 +876,7 @@ export class HUD {
     ctx.textAlign = 'left';
     ctx.font = `800 8px ${BODY}`;
     ctx.fillStyle = C.faint;
-    ctx.fillText('CURRENT PIECE', x + 18, y + 20);
+    ctx.fillText('CURRENT WEAPON', x + 18, y + 20);
     ctx.font = `900 16px ${BODY}`;
     ctx.fillStyle = C.ink;
     ctx.fillText((weapon.name || weapon.id).toUpperCase(), x + 18, y + 40);
@@ -978,7 +980,7 @@ export class HUD {
       ctx.font = `700 12px ${BODY}`;
       ctx.fillStyle = C.dim;
       const tapes = (game.collectibles?.total || 12) - (game.collectibles?.foundCount || 0);
-      ctx.fillText(`Hit a ramp, find ${tapes} tapes, or wait for a call.`, x + 16, y + 38);
+      ctx.fillText(`TAB phone: side jobs, races, Maya. ${tapes} tapes left.`, x + 16, y + 38);
       ctx.restore();
       return;
     }
@@ -1046,6 +1048,95 @@ export class HUD {
       ctx.fillStyle = C.mint;
       ctx.fillText(this.objectiveHint, x + 16, y + (timer !== null ? 120 : 102));
     }
+    ctx.restore();
+  }
+
+  // -----------------------------------------------------------------
+  // Side job / street race cards and phone hint
+  // -----------------------------------------------------------------
+  drawActivityCards(ctx, game) {
+    const missionsActive = !!game.missions?.active;
+    let y = missionsActive ? 338 : 278;
+    const cards = [];
+    const job = game.jobs?.status?.();
+    const race = game.races?.status?.();
+    if (job?.active) cards.push({ kind: 'SIDE JOB', data: job });
+    if (race?.active) cards.push({ kind: 'STREET RACE', data: race });
+    for (const card of cards) {
+      const d = card.data;
+      const w = 374;
+      const h = 100;
+      const color = d.color || C.gold;
+      ctx.save();
+      ctx.fillStyle = C.panel;
+      panelPath(ctx, 20, y, w, h, 9);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 220, 160, 0.2)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.fillRect(20, y, 4, h);
+      ctx.textAlign = 'left';
+      ctx.font = `900 9px ${BODY}`;
+      ctx.fillStyle = color;
+      const kicker = card.kind === 'STREET RACE'
+        ? `${d.short}  ·  LAP ${d.lap}/${d.laps}  ·  CP ${d.checkpoint}/${d.checkpoints}`
+        : `${d.short}  ·  ${d.progress}`;
+      ctx.fillText(kicker, 36, y + 18);
+      ctx.font = `700 12px ${BODY}`;
+      ctx.fillStyle = C.ink;
+      let objective = d.objective;
+      if (card.kind === 'STREET RACE' && d.phase === 'countdown') objective = `Start in ${d.countdown || '3'}...`;
+      const lines = wrapLines(ctx, objective, w - 150).slice(0, 1);
+      ctx.fillText(lines[0] || '', 36, y + 39);
+      ctx.textAlign = 'right';
+      ctx.font = `900 18px ${MONO}`;
+      const time = card.kind === 'STREET RACE' ? d.timer : d.timer;
+      ctx.fillStyle = time < 15 ? '#ff7d86' : C.gold;
+      ctx.fillText(`${Math.ceil(time)}s`, w - 16, y + 39);
+      if (d.patientTimer !== null && d.patientTimer !== undefined) {
+        ctx.font = `800 8px ${BODY}`;
+        ctx.fillStyle = d.patientTimer < 8 ? '#ff7d86' : C.mint;
+        ctx.textAlign = 'left';
+        ctx.fillText(`PATIENT ${Math.ceil(d.patientTimer)}s`, 36, y + 57);
+      }
+      ctx.fillStyle = 'rgba(255, 96, 104, 0.14)';
+      panelPath(ctx, 36, y + 66, w - 52, 4, 2);
+      ctx.fill();
+      const max = card.kind === 'STREET RACE' ? (d.timer + d.elapsed) : d.timerMax;
+      const frac = clamp(1 - d.timer / Math.max(1, max), 0, 1);
+      ctx.fillStyle = color;
+      panelPath(ctx, 36, y + 66, (w - 52) * frac, 4, 2);
+      ctx.fill();
+      ctx.textAlign = 'left';
+      ctx.font = `800 8px ${BODY}`;
+      ctx.fillStyle = C.faint;
+      ctx.fillText(card.kind === 'STREET RACE' ? 'CHECKPOINTS IN ORDER · PHONE FOR THE BOARD' : 'SIDE SHIFT · PHONE FOR THE BOARD', 36, y + 88);
+      ctx.restore();
+      y += h + 10;
+    }
+  }
+
+  drawPhoneHint(ctx, game) {
+    if (game.state !== 'playing' && game.state !== 'dialogue') return;
+    const x = 1046;
+    const y = 556;
+    const w = 214;
+    const h = 22;
+    ctx.save();
+    ctx.fillStyle = 'rgba(10, 13, 19, 0.72)';
+    panelPath(ctx, x, y, w, h, 6);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 220, 160, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = C.gold;
+    ctx.font = `900 9px ${BODY}`;
+    ctx.textAlign = 'left';
+    ctx.fillText('TAB', x + 12, y + 15);
+    ctx.fillStyle = C.dim;
+    ctx.font = `800 8px ${BODY}`;
+    ctx.fillText('PHONE · JOBS · RACES · MAP', x + 40, y + 15);
     ctx.restore();
   }
 
@@ -1154,8 +1245,9 @@ export class HUD {
     ctx.font = `700 9px ${BODY}`;
     ctx.fillStyle = C.faint;
     ctx.fillText(`${station.genre}  ·  Q TO TUNE`, x + 44, y + 39);
+    const pulse = clamp(game.music?.pulse ?? 0, 0, 1);
     for (let i = 0; i < 5; i += 1) {
-      const bar = 3 + Math.abs(Math.sin(this.titleTime * (3 + i * 0.65) + i)) * 14;
+      const bar = 3 + Math.abs(Math.sin(this.titleTime * (3 + i * 0.65) + i)) * 8 + pulse * (8 + (i % 3) * 3);
       ctx.fillStyle = station.color;
       ctx.globalAlpha = alpha * 0.85;
       ctx.fillRect(x + 254 + i * 7, y + 44 - bar, 4, bar);
@@ -1374,6 +1466,7 @@ export class HUD {
       case 'wasted': this.drawFateScreen(ctx, game, 'WASTED', '#ff5d6c', 'Costa Sol General patched you up.'); break;
       case 'busted': this.drawFateScreen(ctx, game, 'BUSTED', '#82b8ff', 'The precinct booked you.'); break;
       case 'photo': this.drawPhotoOverlay(ctx, game); break;
+      case 'phone': game.phone?.draw(ctx, game); break;
       case 'ending': this.drawEndingScreen(ctx, game); break;
       default: break;
     }
@@ -1572,7 +1665,7 @@ export class HUD {
     ctx.textAlign = 'center';
     ctx.font = `700 11px ${BODY}`;
     ctx.fillStyle = 'rgba(255, 243, 220, 0.62)';
-    ctx.fillText('WASD move · MOUSE aim · E enter · G frag · SPACE handbrake · Z photo · ESC pause', 640, 692);
+    ctx.fillText('WASD move · MOUSE aim · E enter · G frag · SPACE handbrake · TAB phone · Z photo · ESC pause', 640, 692);
     ctx.textAlign = 'right';
     ctx.font = `700 9px ${BODY}`;
     ctx.fillStyle = 'rgba(255, 243, 220, 0.35)';
@@ -1643,7 +1736,7 @@ export class HUD {
           ['Z', 'Photo mode (new)'],
           ['Q', 'Cycle radio station'],
           ['M', 'Mute / unmute'],
-          ['T', 'Clock and weather report'],
+          ['TAB', 'Phone: jobs, races, map'],
           ['GOLD MARKER', 'Start the next job'],
           ['RAMPS', 'Hit them fast for airtime'],
           ['MIXTAPES', 'Find all twelve for a bonus'],

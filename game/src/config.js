@@ -7,10 +7,10 @@
 
 export const GAME_TITLE = 'Leonida Heat';
 export const GAME_SUBTITLE = 'A Costa Sol Crime Story';
-export const GAME_VERSION = '3.0.0';
-export const SAVE_KEY = 'leonida-heat-save-v3';
-export const SAVE_VERSION = 3;
-export const LEGACY_SAVE_KEYS = ['leonida-heat-save-v2', 'leonida-heat-save-v1'];
+export const GAME_VERSION = '5.0.0';
+export const SAVE_KEY = 'leonida-heat-save-v4';
+export const SAVE_VERSION = 4;
+export const LEGACY_SAVE_KEYS = ['leonida-heat-save-v3', 'leonida-heat-save-v2', 'leonida-heat-save-v1'];
 export const STEP = 1 / 60;
 
 export const MAP_CONFIG = {

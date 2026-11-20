@@ -1,4 +1,4 @@
-// Leonida Heat v3 - packaging entrypoint.
+// Leonida Heat v5 - packaging entrypoint.
 // The game is the static game/ folder (Canvas 2D + Web Audio, no build, no
 // network). This file validates the submission against the scorer's caps,
 // checks that the four screenshots really are 1280 x 720, copies game/ and
@@ -13,7 +13,7 @@ import { extname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier, INDEX_HTML, INDEX_HTML_MAX_BYTES } from './vendor/makefun-game.ts';
 
-const TITLE = 'Leonida Heat v3';
+const TITLE = 'Leonida Heat v5';
 
 // The scorer's caps. Keep these exact: buildDossier refuses anything the
 // grader would refuse, and the dossier must match byte for byte.

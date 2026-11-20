@@ -37,6 +37,9 @@ export function migrateSave(raw) {
   const missions = raw.missions && typeof raw.missions === 'object' ? raw.missions : {};
   const settings = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
   const album = raw.collectibles && typeof raw.collectibles === 'object' ? raw.collectibles : {};
+  const jobs = raw.jobs && typeof raw.jobs === 'object' ? raw.jobs : null;
+  const races = raw.races && typeof raw.races === 'object' ? raw.races : null;
+  const phone = raw.phone && typeof raw.phone === 'object' ? raw.phone : {};
   const found = Array.isArray(album.found)
     ? album.found.filter((id) => typeof id === 'string' || Number.isFinite(Number(id))).slice(0, 24)
     : [];
@@ -75,6 +78,21 @@ export function migrateSave(raw) {
     settings: {
       muted: !!(settings.muted ?? raw.muted),
       station: clampNumber(settings.station ?? raw.station, 0, 0, 3),
+      zoom: clampNumber(settings.zoom ?? phone.zoom, 2, 0.8, 3.2),
+    },
+    jobs: jobs ? {
+      completed: jobs.completed && typeof jobs.completed === 'object' ? { ...jobs.completed } : {},
+      active: jobs.active && typeof jobs.active === 'object' ? { ...jobs.active } : null,
+    } : null,
+    races: races ? {
+      completed: races.completed && typeof races.completed === 'object' ? { ...races.completed } : {},
+      bestTimes: races.bestTimes && typeof races.bestTimes === 'object' ? { ...races.bestTimes } : {},
+      active: races.active && typeof races.active === 'object' ? { ...races.active } : null,
+    } : null,
+    phone: {
+      tab: clampNumber(phone.tab, 0, 0, 4),
+      messagesRead: clampNumber(phone.messagesRead, 0, 0, 99),
+      zoom: clampNumber(phone.zoom ?? settings.zoom, 2, 0.8, 3.2),
     },
     collectibles: {
       found,
@@ -90,6 +108,7 @@ export function migrateSave(raw) {
       kills: clampNumber(raw.stats?.kills, 0, 0, 999999),
       crimes: clampNumber(raw.stats?.crimes, 0, 0, 999999),
       jobs: clampNumber(raw.stats?.jobs, 0, 0, 99999),
+      photos: clampNumber(raw.stats?.photos, 0, 0, 99999),
     },
     flags: raw.flags && typeof raw.flags === 'object' ? { ...raw.flags } : {},
   };

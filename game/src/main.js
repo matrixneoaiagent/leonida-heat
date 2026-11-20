@@ -1,4 +1,4 @@
-// Leonida Heat v3 - browser entry.
+// Leonida Heat v5 - browser entry.
 // Boots the game, honours ?shot=name&seed=N (fresh seeded world, scripted
 // play, frozen frame), wires the test handle, keeps the canvas focused and
 // letterboxed, and surfaces any boot error in the page instead of a blank tab.
@@ -26,7 +26,7 @@ window.addEventListener('unhandledrejection', (event) => showError(String(event.
 if (!canvas) {
   showError('the game canvas is missing.');
 } else {
-  const context = canvas.getContext('2d', { alpha: false });
+  const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
   if (!context) {
     showError('Canvas 2D is not available. Try a current desktop browser.');
   } else {

@@ -1,0 +1,14 @@
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { chromium } = require('/tmp/opencode/identity_poc/node_modules/playwright-core');
+const browser = await chromium.launch({ executablePath: '/home/kozak/.local/bin/chromium', args: ['--no-sandbox','--disable-dev-shm-usage','--disable-gpu'] });
+const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+await page.goto('http://127.0.0.1:8080/', { waitUntil: 'load' });
+await page.waitForFunction(() => !!window.leonidaHeat);
+await page.evaluate(() => { const g=window.leonidaHeat; g.newGame(2026); g.teleport(2520,1400,-Math.PI/2); });
+await page.waitForTimeout(2000);
+console.log(await page.evaluate(() => ({ tiles: window.leonidaHeat.renderer.tiles.size, layers: !!window.leonidaHeat.renderer._lightLayer })));
+const fps = await page.evaluate(async () => { const t0=performance.now(); let n=0; await new Promise(res=>{ const f=()=>{n++; if(performance.now()-t0>3000)res(); else requestAnimationFrame(f);}; requestAnimationFrame(f);}); return n/((performance.now()-t0)/1000); });
+console.log('fps', fps);
+console.log(await page.evaluate(() => ({ tiles: window.leonidaHeat.renderer.tiles.size, perf: window.leonidaHeat.perf })));
+await browser.close();

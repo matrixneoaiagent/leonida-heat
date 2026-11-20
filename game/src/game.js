@@ -1,4 +1,4 @@
-// Leonida Heat v4 - the game director.
+// Leonida Heat v5 - the game director.
 //
 // One fixed-step loop drives a table of mode handlers. The director owns the
 // world build (seeded city, traffic, people, police, jobs, pickups), a spring
@@ -26,6 +26,10 @@ import { InputManager } from './input.js';
 import { SoundEngine } from './audio.js';
 import { HUD } from './hud.js';
 import { Renderer } from './renderer.js';
+import { JobManager } from './systems/jobs.js';
+import { RaceManager } from './systems/races.js';
+import { AdaptiveMusic } from './systems/music.js';
+import { Phone } from './ui/phone.js';
 import { saveGame as persistSave, loadGame as readSave, hasSave, saveSummary } from './save.js';
 import { mulberry32, seedFrom, pick } from './rng.js';
 
@@ -40,11 +44,13 @@ const MENU_MODES = new Set(['title', 'paused', 'missionFailed', 'ending']);
 export class Game {
   constructor(canvas) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: false });
+    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     this.input = new InputManager(canvas);
     this.audio = new SoundEngine();
     this.ui = new HUD();
     this.renderer = new Renderer(canvas);
+    this.music = new AdaptiveMusic(this.audio);
+    this.phone = new Phone(this);
 
     this.state = 'title';
     this.stateTimer = 0;
@@ -55,13 +61,14 @@ export class Game {
     this.todBase = TIME_OF_DAY.start;
 
     this.camera = {
-      x: 2540, y: 1240, zoom: 1.9, baseZoom: 1.9, shake: 0,
+      x: 2540, y: 1240, zoom: 1.9, baseZoom: 1.9, zoomBias: 1, shake: 0,
       leadX: 0, leadY: 0, aiming: false,
     };
     this.lastFrame = 0;
     this.accumulator = 0;
     this.running = false;
     this.frameTimes = [];
+    this.perf = { update: 0, render: 0, frame: 0, steps: 0 };
 
     this.shotFrozen = false;
     this.shotStaging = false;
@@ -112,6 +119,7 @@ export class Game {
       wasted: (dt) => this.modeFate(dt),
       busted: (dt) => this.modeFate(dt),
       photo: (dt) => this.modePhoto(dt),
+      phone: (dt) => this.modePhone(dt),
       ending: (dt) => this.modeEnding(dt),
     };
 
@@ -158,6 +166,10 @@ export class Game {
     this.missions = new MissionManager(this.city, this);
     this.missions.currentIndex = 0;
     this.missions.active = false;
+    this.jobs = new JobManager(this.city, this);
+    this.races = new RaceManager(this.city, this);
+    this.phone.reset();
+    this.camera.zoomBias = 1;
 
     this.bustedTriggered = false;
     this.wastedTriggered = false;
@@ -259,6 +271,7 @@ export class Game {
 
   startTitle(seed = null) {
     if (seed !== null) this.buildWorld(seed, true);
+    this.phone.isOpen = false;
     this.enterMode('title');
     this.ui.dialog = null;
     this.ui.banner = null;
@@ -344,6 +357,9 @@ export class Game {
 
     this.traffic.seed(this.player.x, this.player.y, 20, 20);
     this.combat.populate(this.player.x, this.player.y, 44, 900);
+    this.phone.restore({ ...(data.phone || {}), zoom: data.phone?.zoom ?? data.settings?.zoom });
+    this.jobs.restore(data.jobs || null);
+    this.races.restore(data.races || null);
     this.enterMode('playing');
     this.ui.displayedMoney = p.money;
     this.ui.displayedHealth = p.health;
@@ -365,7 +381,7 @@ export class Game {
     const p = this.player;
     if (!p) return;
     const ok = persistSave({
-      version: 3,
+      version: 4,
       seed: this.seed,
       timeOfDay: this.timeOfDay,
       weather: { ...this.weather, flash: 0 },
@@ -389,7 +405,10 @@ export class Game {
         stepIndex: this.missions.active ? this.missions.stepIndex : 0,
         checkpoint: this.missions.checkpointStep,
       },
-      settings: { muted: this.audio.muted, station: this.audio.stationIndex },
+      settings: { muted: this.audio.muted, station: this.audio.stationIndex, zoom: this.phone.zoomSetting },
+      jobs: this.jobs.serialize(),
+      races: this.races.serialize(),
+      phone: this.phone.serialize(),
       collectibles: {
         found: this.collectibles.foundIds(),
         count: this.collectibles.foundCount,
@@ -418,9 +437,10 @@ export class Game {
     this.lastFrame = timestamp;
     if (this.frameTimes.length > 240) this.frameTimes.shift();
     this.frameTimes.push(dt);
+    const updateStart = performance.now();
+    let steps = 0;
     if (!this.shotFrozen) {
       this.accumulator += dt;
-      let steps = 0;
       while (this.accumulator >= STEP && steps < 6) {
         this.update(STEP);
         this.accumulator -= STEP;
@@ -428,12 +448,29 @@ export class Game {
       }
       if (steps >= 6) this.accumulator = 0;
     }
+    const renderStart = performance.now();
     this.render();
+    const renderEnd = performance.now();
+    const updateMs = renderStart - updateStart;
+    const renderMs = renderEnd - renderStart;
+    const k = 0.08;
+    this.perf.update += (updateMs - this.perf.update) * k;
+    this.perf.render += (renderMs - this.perf.render) * k;
+    this.perf.frame += (dt * 1000 - this.perf.frame) * k;
+    this.perf.steps = steps;
     this.input.endFrame();
     requestAnimationFrame((ts) => this.frame(ts));
   }
 
   update(dt) {
+    if (this.state === 'phone') {
+      this.music.update(dt, this);
+      this.phone.update(dt, this);
+      this.ui.update(dt, this);
+      this.updateCamera(dt);
+      return;
+    }
+
     if (this.input.anyGesture) {
       if (!this.audio.initialized) {
         this.audio.init();
@@ -448,6 +485,7 @@ export class Game {
     this.sessionTime += dt;
     this.crimeCooldown = Math.max(0, this.crimeCooldown - dt);
     this.updateClock();
+    this.music.update(dt, this);
 
     // Global keys.
     if (this.state !== 'photo') {
@@ -514,6 +552,11 @@ export class Game {
   }
 
   modePlaying(dt) {
+    if (this.input.wasPressed('Tab')) {
+      this.consumePress('Tab');
+      this.phone.openPhone();
+      return;
+    }
     if (this.input.pause) {
       this.consumePress('Escape', 'KeyP');
       this.enterMode('paused');
@@ -545,6 +588,8 @@ export class Game {
     }
 
     this.missions.update(dt, p);
+    this.jobs.update(dt, p);
+    this.races.update(dt, p);
     this.traffic.update(dt, p, this.particles, this.audio, this.police, this);
     this.police.update(dt, p, this.particles, this.audio, this);
     this.combat.update(dt, p, this.traffic, this.police, this.particles, this.audio, this);
@@ -604,6 +649,11 @@ export class Game {
   modeEnding(dt) {
     this.updateAmbient(dt);
     this.handleEndingInput(dt);
+  }
+
+  modePhone(dt) {
+    this.music.update(dt, this);
+    this.phone.update(dt, this);
   }
 
   modePhoto(dt) {
@@ -727,6 +777,16 @@ export class Game {
     const p = this.player;
     const v = p.vehicle;
     if (!v || v.isDestroyed) return;
+    if (this.races?.locked) {
+      v.brake(1, dt);
+      v.update(dt, this.city, this.particles, this.audio, { wetness: this.weather.wetness });
+      p.x = v.x;
+      p.y = v.y;
+      p.angle = v.angle;
+      p.vx = 0;
+      p.vy = 0;
+      return;
+    }
     p.tickTimers(dt);
     const steer = (this.input.right ? 1 : 0) - (this.input.left ? 1 : 0);
     v.handbrake = this.input.handbrake;
@@ -819,6 +879,10 @@ export class Game {
     if (marker && Math.hypot(p.x - marker.x, p.y - marker.y) < marker.radius + 46) {
       return { kind: 'job', marker, label: `START JOB - ${marker.mission.title.toUpperCase()}` };
     }
+    const side = this.jobs?.nearbyMarker(p.x, p.y);
+    if (side) {
+      return { kind: 'sidejob', job: side, label: `START ${side.name.toUpperCase()}` };
+    }
     const vehicle = this.traffic.findNearestVehicle(p.x, p.y, 80);
     if (vehicle) {
       return {
@@ -858,6 +922,10 @@ export class Game {
     }
     if (target.kind === 'job') {
       this.missions.start(target.marker.index);
+      return;
+    }
+    if (target.kind === 'sidejob') {
+      this.jobs.start(target.job.id);
       return;
     }
     if (target.kind === 'vehicle') {
@@ -1025,7 +1093,10 @@ export class Game {
   updateHeatMusic() {
     const stars = this.police.wantedStars;
     const mission = this.missions.active ? 1 : 0;
-    this.audio.setMusicIntensity(stars >= 4 ? 3 : stars >= 2 ? 2 : stars > 0 ? 1 : mission ? 1 : 0);
+    const side = (this.jobs?.active || this.races?.active) ? 1 : 0;
+    const level = stars >= 4 ? 3 : stars >= 2 ? 2 : stars > 0 ? 1 : (mission || side) ? 1 : 0;
+    this.audio.setMusicIntensity(level);
+    this.music?.setIntensity(level + (this.races?.active ? 1 : 0));
   }
 
   updateAmbient(dt) {
@@ -1244,6 +1315,8 @@ export class Game {
       };
       this.missions.failSilent(wasted ? 'You were wasted.' : 'You were busted.');
     }
+    this.jobs?.abort(wasted ? 'You were wasted.' : 'You were busted.');
+    this.races?.abort(wasted ? 'You were wasted.' : 'You were busted.');
     if (this.player.isInVehicle) {
       const v = this.player.vehicle;
       this.lastVehicle = v;
@@ -1429,7 +1502,7 @@ export class Game {
         }
       }
       const ratio = Math.min(1, speed / 540);
-      targetZoom = 2.05 - ratio * 0.42;
+      targetZoom = (2.05 - ratio * 0.42) * (this.camera.zoomBias || 1);
       if (this.state === 'wasted' || this.state === 'busted') targetZoom = 1.72;
     }
 
@@ -1660,8 +1733,11 @@ export class Game {
   // =================================================================
   render() {
     this.renderer.render(this);
+    this.drawSystemWorld();
     if (HUD_MODES.has(this.state)) {
       this.ui.drawHUD(this.ctx, this);
+      if (this.jobs?.active || this.jobs?.result) this.jobs.drawOverlay(this.ctx, this);
+      if (this.races?.active || this.races?.result) this.races.drawOverlay(this.ctx, this);
       if ((this.state === 'playing' || this.state === 'dialogue') && this.player.hitFlash > 0.03) {
         const ctx = this.ctx;
         const flash = ctx.createRadialGradient(640, 360, 220, 640, 360, 780);
@@ -1672,6 +1748,22 @@ export class Game {
       }
     }
     this.ui.drawScreens(this.ctx, this);
+  }
+
+  drawSystemWorld() {
+    if (this.state === 'phone' || this.state === 'title' || this.state === 'controls' || this.state === 'ending') return;
+    const jobs = this.jobs;
+    const races = this.races;
+    if (!jobs?.active && !races?.active && !jobs?.defs && !races?.defs) return;
+    const ctx = this.ctx;
+    const cam = this.camera;
+    ctx.save();
+    ctx.translate(640, 360);
+    ctx.scale(cam.zoom, cam.zoom);
+    ctx.translate(-cam.x, -cam.y);
+    jobs?.drawWorld(ctx, this);
+    races?.drawWorld(ctx, this);
+    ctx.restore();
   }
 
   // =================================================================
@@ -1736,8 +1828,15 @@ export class Game {
       get game() { return game; },
       get collectibles() { return game.collectibles; },
       get photo() { return game.photo; },
+      get jobs() { return game.jobs; },
+      get races() { return game.races; },
+      get phone() { return game.phone; },
+      get music() { return game.music; },
+      get perf() { return game.perf; },
       setWanted: (n) => game.setWanted(n),
       startMission: (i, s = 0) => game.startMission(i, s),
+      openPhone: () => game.phone.openPhone(),
+      closePhone: () => game.phone.closePhone(),
       get state() { return game.state; },
       get shotReady() { return game.shotReady; },
       get frameTimes() { return game.frameTimes; },
@@ -1760,6 +1859,10 @@ export class Game {
       },
       wanted: this.police.wantedStars,
       mission: this.missions.active ? this.missions.currentIndex : null,
+      sideJob: this.jobs?.active ? this.jobs.id : null,
+      race: this.races?.active ? this.races.id : null,
+      phone: this.phone?.isOpen || false,
+      perf: { update: Number(this.perf.update.toFixed(2)), render: Number(this.perf.render.toFixed(2)) },
       traffic: this.traffic.vehicles.length,
       peds: this.combat.pedestrians.length,
       enemies: this.combat.enemies.length,
